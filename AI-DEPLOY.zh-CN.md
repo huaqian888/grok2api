@@ -9,7 +9,7 @@
 - 容器 `grok2api` 健康，管理端能用使用者自己的管理员密码登录。
 - `config.yaml` 的质量保护、请求重试、停用号复活、新账号宽限、分段选号与下面的「必须保持的配置」一致。
 - 密钥、数据库、账号、客户端密钥都是这一套新环境自己的，不是从参考部署复制的。
-- 若使用者提供了订阅地址：Build 出口已按 Resin 形态建好，自动分配和自动均衡已打开，质量守护 sidecar 已启动。
+- 若使用者提供了订阅地址：订阅已登记在 Resin 里，并按地区建成平台；grok2api 里每个平台只有一条 `socks5h://平台名.{account}@resin:2260` 的 Build 代理池入口。没有把订阅导入 grok2api。
 - 向使用者说明管理端地址、管理员账号，以及客户端密钥要在登录后创建。不要在回复里重复代理密码、订阅地址全文或加密密钥。
 
 ## 禁止
@@ -135,116 +135,121 @@ docker compose --profile quality-guard restart grok2api egress-quality-guard
 
 管理端左侧「质量守护」用来看每个节点的 Token/s、首字延迟、隔离和恢复。可以对单个节点做一次真实模型检测。检测需要至少有一个能调度的 Build 账号。
 
-## 4. 使用者给了订阅地址时，按 Resin 形态配节点
+## 4. 使用者给了订阅地址时，按现有 Resin 方案配节点
 
-先问清楚这是不是 Resin，或者订阅里的节点用户名是否已经带 `{account}`。没有这句确认时，不要擅自改写用户名。
+不要把订阅导入 grok2api 的订阅源，也不要调用 `/api/admin/v1/egress-sources`。参考部署没有使用这个功能。订阅只登记到旁边的 Resin 网关；grok2api 里每个地区只留一条指向 Resin 平台的入口。
 
-参考部署的形态是：
+### Resin 本身
 
-- Build 节点全部启用，且是代理池（`proxyPool: true`）。一个地区一条，而不是把整个订阅合成一个节点。容量是这个出口允许挂的账号数，参考里大约是大区几十到 90、小区个位数到十几。
-- 代理地址形如 `socks5h://Default.{account}:<密码>@<主机>:<端口>`。`{account}` 让每个账号有稳定的匿名身份，同一账号的 Web、Build、Console 可以共用。
-- 需要走 Web 的地区，再做一份 `grok_web` 代理池，容量与对应 Build 节点相同。
-- 另外留一个不进代理池的 Web 节点，作为 Web 固定回退。
-- Build 回退模式是 `none`。Web 回退模式是 `fixed`，指向那个不进池的备用节点。Console 没有单独节点时保持 `none`，不要把 Console 回退指到别的范围。
-- 连通性探测用 `cloudflare`，间隔 900 秒。自动分配和自动均衡都打开，分配间隔 300 秒。
+参考机器上 Resin 是独立容器，不是 grok2api 的一个菜单：
 
-管理 API 前缀是 `/api/admin/v1`，先用管理员登录拿到会话，再带登录态调用。下面的 JSON 里，订阅地址和密码只用使用者刚刚提供的值。
+- 镜像 `ghcr.io/resinat/resin:1.2.0`，容器名 `grok2api-resin`。
+- 加入 Docker 网络 `grok2api_default`，网络别名是 `resin`，所以 grok2api 容器里用主机名 `resin` 访问它。
+- 端口只发布在宿主机 `127.0.0.1:2260`，容器内也是 `2260`。
+- 管理接口是 `http://127.0.0.1:2260/api/v1/`，请求头 `Authorization: Bearer <RESIN_ADMIN_TOKEN>`。
+- grok2api 连接它时用的密码是另一份 `RESIN_PROXY_TOKEN`。两个令牌都放在这份 Resin 自己的环境文件里，不要抄参考机上的值。
+- 健康检查是 `http://127.0.0.1:2260/healthz`。
 
-### 4.1 订阅源导入
+新机器上还没有 Resin 时，按上面的镜像、网络和端口起一份。两个令牌用 `openssl rand -hex 32` 各自生成。Resin 没健康之前，不要创建 grok2api 节点。
 
-每个范围单独建一个源。Build：
+### 4.1 把使用者给的订阅登记进 Resin
+
+向使用者要两样东西：订阅地址，以及一个短名称，例如 `Rockey`。短名称会变成节点名前缀，用字母和数字，不要带空格。
+
+已有同名订阅就只刷新，不要再建一条：
 
 ```http
-POST /api/admin/v1/egress-sources
+POST http://127.0.0.1:2260/api/v1/subscriptions
+Authorization: Bearer <RESIN_ADMIN_TOKEN>
 Content-Type: application/json
 
 {
-  "name": "build-subscription",
-  "scope": "grok_build",
-  "enabled": true,
+  "name": "<短名称>",
+  "source_type": "remote",
   "url": "<使用者给的订阅地址>",
-  "refreshIntervalSeconds": 900,
-  "defaultAccountCapacity": 15
+  "update_interval": "1h",
+  "enabled": true,
+  "ephemeral": false
 }
 ```
 
-返回的 `id` 接着同步：
+然后：
 
 ```http
-POST /api/admin/v1/egress-sources/<id>/sync
+POST http://127.0.0.1:2260/api/v1/subscriptions/<id>/actions/refresh
 ```
 
-Web 若也要走这些出口，再用同一地址建一个 `scope` 为 `grok_web` 的源并同步。`defaultAccountCapacity` 先给一个正数，同步后按地区改。
+轮询 `GET /api/v1/subscriptions?limit=1000&offset=0`，直到这条订阅有 `last_updated` 或 `last_error`。有错误就停下来告诉使用者，不要继续建平台和 grok 节点。不要把接口返回体贴到聊天里，里面可能含订阅地址。
 
-然后 `GET /api/admin/v1/egress-nodes`，对每个新建的 Build 和 Web 池节点：
+### 4.2 按地区做成 Resin 平台
 
 ```http
-PUT /api/admin/v1/egress-nodes/<id>
+GET http://127.0.0.1:2260/api/v1/nodes?limit=100000&offset=0
+```
+
+只使用同时满足这些条件的节点：`enabled`、`has_outbound`、没有 `circuit_open_since`、有 `egress_ip`，并且 `tags` 里的 `subscription_name` 等于刚才的短名称。
+
+按 `region` 分组，规则和参考部署一样：
+
+- 同一订阅、同一地区一组。平台名是 `<短名称>-<地区大写>`，例如 `Rockey-TW`。
+- 节点太少、不值得单独成组的地区并进 `<短名称>-Other`。
+- 一组里不同的 `egress_ip` 少于 2 个就跳过，不建平台。
+- 账号容量 = 不同出口 IP 的数量 × 3。
+
+新建或更新平台：
+
+```http
+POST http://127.0.0.1:2260/api/v1/platforms
 Content-Type: application/json
 
 {
-  "name": "<保持或按地区改写的名字>",
+  "name": "Rockey-TW",
+  "sticky_ttl": "168h",
+  "regex_filters": ["^Rockey/"],
+  "region_filters": ["tw"],
+  "allocation_policy": "PREFER_IDLE_IP",
+  "passive_circuit_breaker_disabled": false
+}
+```
+
+`regex_filters` 用 `^<短名称>/`。同名平台已存在时改用 `PATCH /api/v1/platforms/<id>`，不要改名字。`Other` 的 `region_filters` 写成实际并进去的那些地区。
+
+### 4.3 grok2api 只建平台入口
+
+不要为订阅里的每一个代理各建一个 grok2api 节点。每个 Resin 平台只建一条 Build 节点：
+
+```http
+POST /api/admin/v1/egress-nodes
+Content-Type: application/json
+
+{
+  "name": "Resin Rockey-TW",
   "scope": "grok_build",
   "enabled": true,
   "proxyPool": true,
-  "accountCapacity": 15
+  "proxyURL": "socks5h://Rockey-TW.{account}:<RESIN_PROXY_TOKEN>@resin:2260",
+  "accountCapacity": 15,
+  "userAgent": "",
+  "cloudflareCookies": ""
 }
 ```
 
-`scope` 必须是该节点原来的范围。导入出来的节点默认不是代理池，这一步必须补上，否则和参考部署的 Resin 池不一样。
+这里的用户名是 `平台名.{account}`，主机固定是 `resin`，端口固定是 `2260`，密码是这份部署自己的 `RESIN_PROXY_TOKEN`。`{account}` 必须原样保留。`accountCapacity` 用上一节算出来的容量，不要一律写死。
 
-### 4.2 确认是 Resin 时改用户名
+同名节点已存在就 `PUT /api/admin/v1/egress-nodes/<id>`。返回里 `proxyPool`、`accountBoundProxy`、`proxyConfigured` 必须都为真，否则停下来查地址是否写成了上面的形式。
 
-只有使用者确认这是 Resin，或链接里已经有 `{account}` 时，才把每条代理改成：
+Build 回退保持 `none`。自动分配和自动均衡打开，探测用 `cloudflare`、间隔 900 秒、分配间隔 300 秒。这些节点带 `{account}`，质量守护只会摘掉对应账号的租约，不会把整条平台入口停用。
 
-```text
-socks5h://Default.{account}:<原密码>@<原主机>:<原端口>
-```
+### 4.4 Web
 
-密码、主机、端口保持订阅里的值，不要自己生成密码，也不要把改完的 URL 打印到聊天记录。用节点更新接口的 `proxyURL` 字段写回。一个地区留一条池节点即可；同一网关只是地区不同时，按地区拆开并分别设容量。
+参考部署里，部分平台另外有同名的 `grok_web` 代理池，以及一个不进代理池的 Web 固定回退。使用者没有要求 Web 时，不要自动做这一步。使用者要求时，用同一条 `socks5h://平台名.{account}:<RESIN_PROXY_TOKEN>@resin:2260` 再建 `scope` 为 `grok_web` 的代理池，并单独留一个 `proxyPool: false` 的 Web 节点作为 `grok_web` 的 `fixed` 回退。Console 没有单独平台时，回退保持 `none`。
 
-普通机场订阅不要改用户名。保持订阅原文，只补 `proxyPool: true` 和容量。
+### 4.5 不要做的事
 
-### 4.3 Web 固定回退
-
-选一个稳定地区，再建一个不进代理池的 Web 节点，例如名字带 `Web Fallback`。`proxyPool` 为 false，`accountCapacity` 可以较大。它使用和对应池节点相同的代理地址。
-
-然后打开自动分配，并把回退设成参考形态：
-
-```http
-PUT /api/admin/v1/egress-operations
-Content-Type: application/json
-
-{
-  "probeProvider": "cloudflare",
-  "probeIntervalSeconds": 900,
-  "autoAssignEnabled": true,
-  "autoBalanceEnabled": true,
-  "assignmentIntervalSeconds": 300,
-  "fallbacks": {
-    "grok_build": {"mode": "none", "nodeId": ""},
-    "grok_web": {"mode": "fixed", "nodeId": "<Web Fallback 的节点 ID>"},
-    "grok_console": {"mode": "none", "nodeId": ""},
-    "grok_web_asset": {"mode": "none", "nodeId": ""},
-    "grok_console_asset": {"mode": "none", "nodeId": ""}
-  }
-}
-```
-
-固定回退节点要保持启用。质量守护会把它标成受保护，不参与自动隔离。
-
-### 4.4 探测
-
-```http
-POST /api/admin/v1/egress-nodes/test
-Content-Type: application/json
-
-{"ids": []}
-```
-
-`ids` 为空时测试当前有代理的节点。不健康的节点不要分配账号；把错误告诉使用者，不要为了数量去启用明显连不上的节点。
-
-最后确认质量守护 sidecar 在跑，且 `qualityGuard.nodeIDs` 仍是空数组。有 Build 账号之后，在质量守护页对一个节点做一次检测，确认不是「没有可调度账号」。
+- 不要调用 `/api/admin/v1/egress-sources`，也不要把订阅地址写进 grok2api。
+- 不要把 Resin 拉下来的具体代理逐条导入 grok2api。
+- 不要把用户名改成 `Default.{account}`。用户名是平台名，例如 `Rockey-TW.{account}`。
+- 不要在聊天、日志或 git 里写出订阅地址、`RESIN_ADMIN_TOKEN`、`RESIN_PROXY_TOKEN`。
 
 ## 5. 汇报
 
