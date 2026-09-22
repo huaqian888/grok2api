@@ -95,8 +95,8 @@ routing:
   reasoningReplayMaxEntries: 10240
   # [按需修改] 按账号隔离上游连接池，适合外部 L4/连接哈希负载均衡；会增加连接数、TLS 握手和文件描述符占用。
   accountIsolatedConnections: false
-  # [通常不要修改] 大账号池默认使用有界分段选号；保留完整池回退、额度优先级和原子并发门禁。
-  segmentedSelectorEnabled: true
+  # [通常不要修改] 大账号池分段选号默认关闭；启用后仍保留完整池回退和原子并发门禁。
+  segmentedSelectorEnabled: false
   segmentedSelectorMinCandidates: 3000
   segmentedSelectorWindowSize: 64
   # [按需修改] 大账号池才需要打开。0 保持历史行为：不健康节点上的 auto 账号会一次性迁走。
@@ -126,7 +126,7 @@ audit:
 # [按需启用] Grok Build 出口质量守护。仅配置后仍不会自动启动 sidecar；
 # 使用 docker compose --profile quality-guard up -d --build 启动。
 qualityGuard:
-  enabled: false
+  enabled: true
   # 主程序会自动创建并复用不可导出的内部探测身份，无需配置 Client Key。
   # 使用已验证会输出推理 Token 的 Build 模型时，内置恢复探针还会校验 reasoning Token。
   model: "grok-4.6"
@@ -150,8 +150,7 @@ qualityGuard:
   nodeIDs: []
   rotatableNodeIDs: []
   # Optional request-path withhold/retry for thinking models.
-  # Recommended lab values are filled in; enabled stays false so stock
-  # installs do not intercept. Set enabled: true to turn the hold on.
+  # Thinking requests withhold weak output and try another account.
   # Observe up to 30s for real reasoning evidence. A reasoning-item stub plus
   # enough visible output at the deadline is withheld (TUI dump after 30s),
   # not released as late ciphertext. Empty stub-only streams keep waiting.
@@ -165,8 +164,8 @@ qualityGuard:
   # Non-empty encrypted_content stubs are not thinking. The ciphertext floor
   # is max(minEncryptedBytes, reasoning_tokens * encryptedBytesPerReasoningToken).
   requestRetry:
-    enabled: false
-    maxAttempts: 3
+    enabled: true
+    maxAttempts: 6
     holdTimeout: 30s
     minOutputTokens: 8
     onExhausted: fail_closed # fail_open | fail_closed
@@ -177,15 +176,14 @@ qualityGuard:
     # Single-account pools should set this lower; toggling enabled does not
     # clear cooldown — use POST /api/admin/v1/accounts/:id/clear-cooldown.
     idleAccountCooldown: 15m
-    # Skip quality cooldowns for newly created accounts. Zero uses 12h.
-    # Requests can still withhold/retry; the new account is not cooled.
-    newAccountGrace: 12h
+    # 0s disables the new-account cooldown grace. Omit the field to use 12h.
+    newAccountGrace: 0s
     minEncryptedBytes: 256
     encryptedBytesPerReasoningToken: 4
     # Periodically probe quality-disabled Build accounts and re-enable
     # those that still produce thinking. Bounded parallel batches.
     disabledRevival:
-      enabled: false
+      enabled: true
       interval: 15m
       batchSize: 100
       concurrency: 32
