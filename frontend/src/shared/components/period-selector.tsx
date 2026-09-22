@@ -1,9 +1,9 @@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PERIOD_DAYS, toPeriodValue, type PeriodDays } from "@/shared/lib/period";
 
-export function PeriodSelector({ value, onChange, ariaLabel, className }: { value: PeriodDays; onChange: (value: PeriodDays) => void; ariaLabel: string; className?: string }) {
+export function PeriodSelector({ value, onChange, ariaLabel, className }: { value: PeriodDays | null; onChange: (value: PeriodDays) => void; ariaLabel: string; className?: string }) {
   return (
-    <Tabs value={String(value)} onValueChange={(next) => { const days = Number(next) as PeriodDays; if (PERIOD_DAYS.includes(days)) onChange(days); }} className={className}>
+    <Tabs value={value == null ? "none" : String(value)} onValueChange={(next) => { const days = Number(next) as PeriodDays; if (PERIOD_DAYS.includes(days)) onChange(days); }} className={className}>
       <TabsList aria-label={ariaLabel}>
       {PERIOD_DAYS.map((days) => (
         <TabsTrigger

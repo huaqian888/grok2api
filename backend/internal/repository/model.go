@@ -23,6 +23,7 @@ type ModelRepository interface {
 	UpsertRoutes(ctx context.Context, values []model.Route) error
 	ReplaceProviderRoutes(ctx context.Context, provider account.Provider, values []model.Route) error
 	ReplaceAccountCapabilities(ctx context.Context, accountID uint64, upstreamModels []string, syncedAt time.Time) error
+	ListAccountCapabilityModels(ctx context.Context, accountID uint64) ([]string, error)
 	MarkAccountCapabilitySyncFailed(ctx context.Context, accountID uint64, attemptedAt time.Time, message string) error
 	HasSuccessfulAccountSync(ctx context.Context, accountID uint64) (bool, error)
 	ListStaleAccountSyncIDs(ctx context.Context, before time.Time, limit int) ([]uint64, error)

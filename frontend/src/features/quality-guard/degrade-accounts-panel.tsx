@@ -10,7 +10,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { updateAccountsEnabled } from "@/features/accounts/accounts-api";
+import { probeQualityDisabledAccounts, updateAccountsEnabled } from "@/features/accounts/accounts-api";
 import { getDegradeAccounts, type DegradeAccountDTO, type DegradeClass, type DegradeSummaryDTO, type DegradeWindow } from "@/features/quality-guard/quality-guard-api";
 import { EmptyState, ErrorState } from "@/shared/components/data-state";
 import { Pagination } from "@/shared/components/pagination";
@@ -45,10 +45,23 @@ export function DegradeAccountsPanel({ softTPS, hardTPS, failClosed, minGenMs }:
 
   const data = query.data;
   const rows = useMemo(() => data?.accounts ?? [], [data?.accounts]);
-  const selectable = useMemo(() => rows.filter((account) => account.found && account.enabled), [rows]);
+  const selectable = useMemo(() => rows.filter((account) => account.found), [rows]);
   const selectedRows = selectable.filter((account) => selected.has(account.id));
+  const muteRows = selectedRows.filter((account) => account.enabled);
+  const probeRows = selectedRows.filter((account) => !account.enabled);
   const allSelected = selectable.length > 0 && selectedRows.length === selectable.length;
 
+  const probeMutation = useMutation({
+    mutationFn: (ids: string[]) => probeQualityDisabledAccounts(ids),
+    onMutate: () => toast.loading(t("qualityGuard.degrade.probing"), { id: "quality-guard-degrade-probe" }),
+    onSuccess: (result) => {
+      setSelected(new Set());
+      void queryClient.invalidateQueries({ queryKey: ["quality-guard-degrade-accounts"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      toast.success(t("qualityGuard.degrade.probeCompleted", result), { id: "quality-guard-degrade-probe" });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : t("qualityGuard.degrade.probeFailed"), { id: "quality-guard-degrade-probe" }),
+  });
   const muteMutation = useMutation({
     mutationFn: (ids: string[]) => updateAccountsEnabled(ids, false, "grok_build"),
     onMutate: () => toast.loading(t("qualityGuard.degrade.muting"), { id: MUTE_TOAST_ID }),
@@ -60,7 +73,7 @@ export function DegradeAccountsPanel({ softTPS, hardTPS, failClosed, minGenMs }:
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : t("qualityGuard.degrade.muteFailed"), { id: MUTE_TOAST_ID }),
   });
-  const busy = muteMutation.isPending;
+  const busy = muteMutation.isPending || probeMutation.isPending;
 
   const toggleAll = (checked: boolean) => {
     setSelected((current) => {
@@ -109,11 +122,16 @@ export function DegradeAccountsPanel({ softTPS, hardTPS, failClosed, minGenMs }:
             <FilterSelect value={status} onChange={(value) => { setStatus(value as "all" | "enabled" | "disabled" | "deleted"); setPage(1); setSelected(new Set()); }} items={[["all", t("qualityGuard.degrade.statusAll")], ["enabled", t("qualityGuard.degrade.statusOn")], ["disabled", t("qualityGuard.degrade.statusOff")], ["deleted", t("qualityGuard.degrade.statusDeleted")]]} />
             <FilterSelect value={cls} onChange={(value) => { setCls(value as "all" | DegradeClass); setPage(1); setSelected(new Set()); }} items={[["all", t("qualityGuard.degrade.classAll")], ["missing_thinking", t("qualityGuard.degrade.classThinking")], ["buffered_burst", "burst"], ["soft_tps", "soft"], ["hard_tps", "hard"]]} />
             <FilterSelect value={String(hitsMin)} onChange={(value) => { setHitsMin(Number(value)); setPage(1); setSelected(new Set()); }} items={[["1", t("qualityGuard.degrade.hitsAll")], ["2", t("qualityGuard.degrade.hitsMin", { count: 2 })], ["3", t("qualityGuard.degrade.hitsMin", { count: 3 })], ["5", t("qualityGuard.degrade.hitsMin", { count: 5 })], ["10", t("qualityGuard.degrade.hitsMin", { count: 10 })]]} />
-            <Button type="button" variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={selectedRows.length === 0 || busy} onClick={() => {
-              if (!window.confirm(t("qualityGuard.degrade.muteConfirm", { count: selectedRows.length }))) return;
-              muteMutation.mutate(selectedRows.map((account) => account.id));
+            <Button type="button" variant="secondary" size="sm" disabled={probeRows.length === 0 || busy} onClick={() => {
+              probeMutation.mutate(probeRows.map((account) => account.id));
             }}>
-              <PowerOff />{selectedRows.length ? t("qualityGuard.degrade.muteSelectedCount", { count: selectedRows.length }) : t("qualityGuard.degrade.muteSelected")}
+              {probeRows.length ? t("qualityGuard.degrade.probeSelectedCount", { count: probeRows.length }) : t("qualityGuard.degrade.probeSelected")}
+            </Button>
+            <Button type="button" variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={muteRows.length === 0 || busy} onClick={() => {
+              if (!window.confirm(t("qualityGuard.degrade.muteConfirm", { count: muteRows.length }))) return;
+              muteMutation.mutate(muteRows.map((account) => account.id));
+            }}>
+              <PowerOff />{muteRows.length ? t("qualityGuard.degrade.muteSelectedCount", { count: muteRows.length }) : t("qualityGuard.degrade.muteSelected")}
             </Button>
             <Button type="button" variant="ghost" size="icon" className="size-8" onClick={() => void query.refetch()} disabled={query.isFetching} aria-label={t("common.refresh")}>
               <RefreshCw className={cn("size-4", query.isFetching && "animate-spin")} />
@@ -138,10 +156,10 @@ export function DegradeAccountsPanel({ softTPS, hardTPS, failClosed, minGenMs }:
               {rows.length === 0 ? (
                 <TableRow><TableCell colSpan={8}><EmptyState message={t("qualityGuard.degrade.noAccounts")} /></TableCell></TableRow>
               ) : rows.map((account) => {
-                const canMute = account.found && account.enabled;
+                const canSelect = account.found;
                 return (
-                  <TableRow key={account.id} className={canMute ? "cursor-pointer" : undefined} onClick={() => {
-                    if (!canMute) return;
+                  <TableRow key={account.id} className={canSelect ? "cursor-pointer" : undefined} onClick={() => {
+                    if (!canSelect) return;
                     setSelected((current) => {
                       const next = new Set(current);
                       if (next.has(account.id)) next.delete(account.id);
@@ -151,7 +169,7 @@ export function DegradeAccountsPanel({ softTPS, hardTPS, failClosed, minGenMs }:
                   }}>
                     <TableCell className="px-3" onClick={(event) => event.stopPropagation()}>
                       <label className="flex size-8 cursor-pointer items-center justify-center">
-                        <Checkbox disabled={!canMute} checked={selected.has(account.id)} onCheckedChange={(checked) => setSelected((current) => {
+                        <Checkbox disabled={!canSelect} checked={selected.has(account.id)} onCheckedChange={(checked) => setSelected((current) => {
                           const next = new Set(current);
                           if (checked === true) next.add(account.id);
                           else next.delete(account.id);

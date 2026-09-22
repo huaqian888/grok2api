@@ -298,9 +298,25 @@ type QualityGuardRequestRetryConfig struct {
 	AccountCooldown Duration `yaml:"accountCooldown"`
 	// IdleAccountCooldown cools an account after a truly empty upstream
 	// stream. Independent of accountCooldown (missing-thinking). Zero uses 15m.
-	IdleAccountCooldown             Duration `yaml:"idleAccountCooldown"`
-	MinEncryptedBytes               int      `yaml:"minEncryptedBytes"`
-	EncryptedBytesPerReasoningToken int      `yaml:"encryptedBytesPerReasoningToken"`
+	IdleAccountCooldown Duration `yaml:"idleAccountCooldown"`
+	// NewAccountGrace skips quality cooldowns for accounts younger than this.
+	// Zero uses 12h. Requests can still withhold/retry during the grace window.
+	NewAccountGrace                 Duration                          `yaml:"newAccountGrace"`
+	MinEncryptedBytes               int                               `yaml:"minEncryptedBytes"`
+	EncryptedBytesPerReasoningToken int                               `yaml:"encryptedBytesPerReasoningToken"`
+	DisabledRevival                 QualityGuardDisabledRevivalConfig `yaml:"disabledRevival"`
+}
+
+// QualityGuardDisabledRevivalConfig periodically probes quality-disabled
+// Build accounts and re-enables those that still produce thinking.
+type QualityGuardDisabledRevivalConfig struct {
+	Enabled        bool     `yaml:"enabled"`
+	Interval       Duration `yaml:"interval"`
+	BatchSize      int      `yaml:"batchSize"`
+	Concurrency    int      `yaml:"concurrency"`
+	MinDisabledAge Duration `yaml:"minDisabledAge"`
+	FailRetryAfter Duration `yaml:"failRetryAfter"`
+	Timeout        Duration `yaml:"timeout"`
 }
 
 type ClientKeyDefaultsConfig struct {
@@ -815,11 +831,39 @@ func validateQualityGuardRequestRetry(value QualityGuardRequestRetryConfig) erro
 	if d := value.IdleAccountCooldown.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
 		return errors.New("qualityGuard.requestRetry.idleAccountCooldown 必须在 1m 到 168h 之间")
 	}
+	if d := value.NewAccountGrace.Value(); d != 0 && (d < time.Minute || d > 168*time.Hour) {
+		return errors.New("qualityGuard.requestRetry.newAccountGrace 必须在 1m 到 168h 之间")
+	}
 	if value.MinEncryptedBytes != 0 && (value.MinEncryptedBytes < 64 || value.MinEncryptedBytes > 4096) {
 		return errors.New("qualityGuard.requestRetry.minEncryptedBytes 必须在 64 到 4096 之间")
 	}
 	if value.EncryptedBytesPerReasoningToken != 0 && (value.EncryptedBytesPerReasoningToken < 1 || value.EncryptedBytesPerReasoningToken > 16) {
 		return errors.New("qualityGuard.requestRetry.encryptedBytesPerReasoningToken 必须在 1 到 16 之间")
+	}
+	return validateQualityGuardDisabledRevival(value.DisabledRevival)
+}
+
+func validateQualityGuardDisabledRevival(value QualityGuardDisabledRevivalConfig) error {
+	if !value.Enabled {
+		return nil
+	}
+	if d := value.Interval.Value(); d != 0 && (d < 5*time.Minute || d > 24*time.Hour) {
+		return errors.New("qualityGuard.requestRetry.disabledRevival.interval 必须在 5m 到 24h 之间")
+	}
+	if value.BatchSize != 0 && (value.BatchSize < 1 || value.BatchSize > 100) {
+		return errors.New("qualityGuard.requestRetry.disabledRevival.batchSize 必须在 1 到 100 之间")
+	}
+	if value.Concurrency != 0 && (value.Concurrency < 1 || value.Concurrency > 32) {
+		return errors.New("qualityGuard.requestRetry.disabledRevival.concurrency 必须在 1 到 64 之间")
+	}
+	if d := value.MinDisabledAge.Value(); d != 0 && (d < time.Minute || d > 24*time.Hour) {
+		return errors.New("qualityGuard.requestRetry.disabledRevival.minDisabledAge 必须在 1m 到 24h 之间")
+	}
+	if d := value.FailRetryAfter.Value(); d != 0 && (d < 15*time.Minute || d > 168*time.Hour) {
+		return errors.New("qualityGuard.requestRetry.disabledRevival.failRetryAfter 必须在 15m 到 168h 之间")
+	}
+	if d := value.Timeout.Value(); d != 0 && (d < 10*time.Second || d > 2*time.Minute) {
+		return errors.New("qualityGuard.requestRetry.disabledRevival.timeout 必须在 10s 到 2m 之间")
 	}
 	return nil
 }
@@ -954,9 +998,15 @@ func defaultConfig() Config {
 			MinimumHealthyNodes: 3, MaxOutputTokens: 384,
 			MinimumGenerationWindow: Duration(time.Second), RotationTimeout: Duration(45 * time.Second),
 			RequestRetry: QualityGuardRequestRetryConfig{
-				MaxAttempts: 6, HoldTimeout: Duration(30 * time.Second), MinOutputTokens: 8, OnExhausted: "fail_closed",
+				MaxAttempts: 3, HoldTimeout: Duration(30 * time.Second), MinOutputTokens: 8, OnExhausted: "fail_closed",
 				AccountCooldown: Duration(12 * time.Hour), IdleAccountCooldown: Duration(15 * time.Minute),
+				NewAccountGrace:   Duration(12 * time.Hour),
 				MinEncryptedBytes: 256, EncryptedBytesPerReasoningToken: 4,
+				DisabledRevival: QualityGuardDisabledRevivalConfig{
+					Interval: Duration(15 * time.Minute), BatchSize: 20, Concurrency: 8,
+					MinDisabledAge: Duration(30 * time.Minute), FailRetryAfter: Duration(6 * time.Hour),
+					Timeout: Duration(45 * time.Second),
+				},
 			},
 		},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},

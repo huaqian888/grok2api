@@ -61,6 +61,7 @@ func TestDashboardRepositorySnapshot(t *testing.T) {
 		{RequestID: "success-1", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok-primary", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 200, Streaming: true, OutputTokens: 90, TotalTokens: 100, FirstTokenMS: &firstTokenOne, DurationMS: 1100, CreatedAt: now.Add(-23 * time.Hour)},
 		{RequestID: "success-2", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok-secondary", Provider: "grok_web", Operation: "responses", UsageSource: "upstream", StatusCode: 201, Streaming: true, OutputTokens: 10, TotalTokens: 50, FirstTokenMS: &firstTokenTwo, DurationMS: 1300, CreatedAt: now.Add(-time.Hour)},
 		{RequestID: "failed", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok-primary", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 500, Streaming: true, OutputTokens: 100, TotalTokens: 10, DurationMS: 550, CreatedAt: now.Add(-2 * time.Hour)},
+		{RequestID: "qg-probe", ClientKeyID: 3, ClientKeyName: "[system] Egress Quality Guard", ModelRouteID: 1, ModelPublicID: "grok-primary", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 500, Streaming: true, OutputTokens: 1, TotalTokens: 1, DurationMS: 20, CreatedAt: now.Add(-3 * time.Hour)},
 		{RequestID: "outside", ClientKeyID: 1, ModelRouteID: 1, Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 200, TotalTokens: 999, CreatedAt: now.Add(-25 * time.Hour)},
 	}
 	for index := range audits {

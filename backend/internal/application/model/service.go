@@ -22,6 +22,10 @@ import (
 const defaultModelSyncWorkers = 25
 const syncFailurePersistTimeout = 5 * time.Second
 
+// buildVideo15Capability 是 Build 视频权益，不是普通目录成员。
+// 账号归一化结果里没有它时，同步会去掉；其余已记录的模型保留。
+const buildVideo15Capability = "grok-imagine-video-1.5"
+
 var maxModelBatchSize = repository.MaxPageSize * len(modeldomain.Capabilities())
 
 var (
@@ -575,7 +579,8 @@ func (s *Service) syncAccountCapabilities(ctx context.Context, value account.Cre
 		return nil, err
 	}
 	models := normalizeDiscoveredModels(values)
-	if normalizer, ok := adapter.(provider.AccountModelCapabilityNormalizer); ok {
+	normalizer, normalizeCapabilities := adapter.(provider.AccountModelCapabilityNormalizer)
+	if normalizeCapabilities {
 		var billing *account.Billing
 		snapshot, billingErr := s.accounts.GetBilling(ctx, credential.ID)
 		if billingErr == nil {
@@ -587,11 +592,62 @@ func (s *Service) syncAccountCapabilities(ctx context.Context, value account.Cre
 		}
 		models = normalizeDiscoveredModels(normalizer.NormalizeAccountModelCapabilities(models, billing, credential))
 	}
-	if err := s.models.ReplaceAccountCapabilities(ctx, credential.ID, models, attemptedAt); err != nil {
+	preserved, err := s.preserveKnownCapabilities(ctx, credential.ID, models, normalizeCapabilities)
+	if err != nil {
+		s.markCapabilitySyncFailed(credential.ID, attemptedAt, err)
+		return nil, err
+	}
+	if err := s.models.ReplaceAccountCapabilities(ctx, credential.ID, preserved, attemptedAt); err != nil {
 		s.markCapabilitySyncFailed(credential.ID, attemptedAt, err)
 		return nil, err
 	}
 	return models, nil
+}
+
+// preserveKnownCapabilities 把这次目录并进已有能力。上游没再返回的旧模型继续保留。
+func (s *Service) preserveKnownCapabilities(ctx context.Context, accountID uint64, discovered []string, stripUnentitledVideo bool) ([]string, error) {
+	existing, err := s.models.ListAccountCapabilityModels(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(existing)+len(discovered))
+	merged := make([]string, 0, len(existing)+len(discovered))
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		merged = append(merged, value)
+	}
+	for _, value := range existing {
+		add(value)
+	}
+	for _, value := range discovered {
+		add(value)
+	}
+	if !stripUnentitledVideo || containsDiscoveredModel(discovered, buildVideo15Capability) {
+		return merged, nil
+	}
+	filtered := make([]string, 0, len(merged))
+	for _, value := range merged {
+		if value != buildVideo15Capability {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered, nil
+}
+
+func containsDiscoveredModel(models []string, want string) bool {
+	for _, value := range models {
+		if strings.TrimSpace(value) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeDiscoveredModels(values []string) []string {

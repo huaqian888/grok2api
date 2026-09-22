@@ -30,8 +30,10 @@ const (
 	defaultBurstMaxVisible                 = int64(32)
 	defaultBurstMinReasoning               = int64(80)
 	defaultMissingThinkingCooldown         = 12 * time.Hour
+	defaultNewAccountGrace                 = 12 * time.Hour
 	lastErrorMissingThinking               = accountdomain.LastErrorMissingThinking
 	lastErrorMissingThinkingDisabled       = accountdomain.LastErrorMissingThinkingDisabled
+	lastErrorThinkingProbation             = accountdomain.LastErrorThinkingProbation
 	// An empty stream that idles while held is treated as an account-quality
 	// failure: the request can still rotate before any bytes reach the client.
 	qualityIdleAccountCooldown = 15 * time.Minute
@@ -53,9 +55,13 @@ type QualityRetryRuntime struct {
 	AccountCooldown time.Duration
 	// IdleAccountCooldown is applied to truly empty upstream streams
 	// (idle timeout / empty peek). Missing-thinking still uses AccountCooldown.
-	IdleAccountCooldown             time.Duration
+	IdleAccountCooldown time.Duration
+	// NewAccountGrace skips quality cooldowns for accounts younger than this.
+	// Requests can still withhold/retry; the new account is not cooled or disabled.
+	NewAccountGrace                 time.Duration
 	MinEncryptedBytes               int
 	EncryptedBytesPerReasoningToken int
+	DisabledRevival                 DisabledAccountRevivalRuntime
 }
 
 // QualityStreamSignals is the hold classifier input. Tests drive this
@@ -114,12 +120,16 @@ func normalizeQualityRetry(cfg QualityRetryRuntime) QualityRetryRuntime {
 	if cfg.IdleAccountCooldown <= 0 {
 		cfg.IdleAccountCooldown = qualityIdleAccountCooldown
 	}
+	if cfg.NewAccountGrace <= 0 {
+		cfg.NewAccountGrace = defaultNewAccountGrace
+	}
 	if cfg.MinEncryptedBytes <= 0 {
 		cfg.MinEncryptedBytes = defaultMinEncryptedBytes
 	}
 	if cfg.EncryptedBytesPerReasoningToken <= 0 {
 		cfg.EncryptedBytesPerReasoningToken = defaultEncryptedBytesPerReasoningToken
 	}
+	cfg.DisabledRevival = normalizeDisabledAccountRevival(cfg.DisabledRevival)
 	cfg.OnExhausted = normalizeQualityExhaustionPolicy(cfg.OnExhausted)
 	return cfg
 }
@@ -508,7 +518,32 @@ func jsonStringEquals(raw json.RawMessage, want string) bool {
 	return json.Unmarshal(raw, &value) == nil && strings.EqualFold(strings.TrimSpace(value), want)
 }
 
+func skipQualityPenaltyForNewAccount(credential accountdomain.Credential, grace time.Duration) bool {
+	if grace <= 0 {
+		grace = defaultNewAccountGrace
+	}
+	if credential.CreatedAt.IsZero() {
+		return false
+	}
+	return time.Now().UTC().Sub(credential.CreatedAt.UTC()) < grace
+}
+
+func (s *Service) skipQualityPenalty(credential accountdomain.Credential) bool {
+	if s == nil {
+		return false
+	}
+	cfg := s.qualityRetryConfig()
+	if !cfg.Enabled {
+		return false
+	}
+	return skipQualityPenaltyForNewAccount(credential, cfg.NewAccountGrace)
+}
+
 func (s *Service) applyMissingThinkingPenalty(ctx context.Context, requestID string, credential accountdomain.Credential, cooldown time.Duration) {
+	if s.skipQualityPenalty(credential) {
+		s.logger.Info("quality_degraded_new_account_skipped", "request_id", requestID, "account_id", credential.ID, "grace", s.qualityRetryConfig().NewAccountGrace.String())
+		return
+	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
 	defer cancel()
 	action, err := s.selector.markMissingThinking(writeCtx, credential, cooldown)

@@ -666,6 +666,12 @@ func (r *AuditRepository) ListCursor(ctx context.Context, input repository.Audit
 	return out, hasMore, nil
 }
 
+func excludeQualityGuardProbes(query *gorm.DB) *gorm.DB {
+	// Sidecar / revival probes use the non-exportable "[system] Egress Quality Guard" key.
+	// Default list and aggregates omit them; selecting that key in the filter still shows them.
+	return query.Where("COALESCE(client_key_name, '') <> ?", "[system] Egress Quality Guard")
+}
+
 func (r *AuditRepository) Summarize(ctx context.Context, input repository.AuditSummaryQuery) (audit.Summary, error) {
 	var aggregate struct {
 		Requests                int64
@@ -1060,6 +1066,8 @@ func applyAuditQuery(query *gorm.DB, search string, start, end time.Time, filter
 	if value := strings.TrimSpace(filter.Key); value != "" {
 		pattern := "%" + strings.ToLower(value) + "%"
 		query = query.Where("LOWER(client_key_name) LIKE ? OR CAST(client_key_id AS TEXT) LIKE ?", pattern, pattern)
+	} else {
+		query = excludeQualityGuardProbes(query)
 	}
 	if value := strings.TrimSpace(filter.Account); value != "" {
 		pattern := "%" + strings.ToLower(value) + "%"

@@ -496,6 +496,54 @@ func TestAuditRepositorySummaryAppliesRangeAndGroupsPricingTier(t *testing.T) {
 	}
 }
 
+func TestAuditRepositorySummaryExcludesQualityGuardProbesUnlessFiltered(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "audit-summary-qg.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewAuditRepository(database)
+	now := time.Now().UTC()
+	values := []audit.Record{
+		{RequestID: "user-ok", ClientKeyID: 1, ClientKeyName: "lyk", ModelRouteID: 1, StatusCode: 200, DurationMS: 10, CreatedAt: now.Add(-time.Hour)},
+		{RequestID: "user-fail", ClientKeyID: 1, ClientKeyName: "lyk", ModelRouteID: 1, StatusCode: 500, DurationMS: 10, CreatedAt: now.Add(-time.Hour)},
+		{RequestID: "qg-probe", ClientKeyID: 9, ClientKeyName: "[system] Egress Quality Guard", ModelRouteID: 1, StatusCode: 500, DurationMS: 10, CreatedAt: now.Add(-time.Hour)},
+	}
+	if err := repository.CreateBatch(ctx, values); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := repository.Summarize(ctx, repositorypkg.AuditSummaryQuery{Start: now.Add(-24 * time.Hour), End: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Requests != 2 || summary.SuccessfulRequests != 1 || summary.FailedRequests != 1 {
+		t.Fatalf("default summary included probes: %#v", summary)
+	}
+	filtered, err := repository.Summarize(ctx, repositorypkg.AuditSummaryQuery{Start: now.Add(-24 * time.Hour), End: now, Filter: repositorypkg.AuditListFilter{Key: "9"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered.Requests != 1 || filtered.SuccessfulRequests != 0 || filtered.FailedRequests != 1 {
+		t.Fatalf("key-filtered summary = %#v", filtered)
+	}
+	items, _, err := repository.ListCursor(ctx, repositorypkg.AuditCursorQuery{Limit: 50, Start: now.Add(-24 * time.Hour), End: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.RequestID == "qg-probe" || item.ClientKeyName == "[system] Egress Quality Guard" {
+			t.Fatalf("default list included quality-guard probe: %#v", item)
+		}
+	}
+	if len(items) != 2 {
+		t.Fatalf("default list = %#v", items)
+	}
+}
+
 func TestAuditRepositoryStreamFailureKeepsHTTPStatusAndFiltersAsOther(t *testing.T) {
 	ctx := context.Background()
 	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "audit-stream-failure.db"))

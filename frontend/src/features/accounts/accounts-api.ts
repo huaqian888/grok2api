@@ -328,6 +328,8 @@ export function enableWebAccountNSFW(id: string): Promise<{ completed: boolean }
 }
 
 export type AccountBatchResultDTO = { succeeded: number; failed: number };
+export type QualityProbeResultDTO = AccountBatchResultDTO & { skipped: number; timedOut?: number };
+export type QualityProbeItemDTO = { id: string; name: string; outcome: "revived" | "failed" | "skipped" | "timeout"; reason?: string; outputTokens?: number; reasoningTokens?: number };
 export type AccountTokenRefreshResultDTO = AccountBatchResultDTO & { skipped: number };
 
 /** 管理端 Grok Build 检测的单账号增量结果（SSE event: item）。 */
@@ -387,15 +389,18 @@ export type AccountImportResultDTO = {
 
 export type WebConsoleSyncResultDTO = AccountImportResultDTO & { skipped: number };
 
-type AccountTaskStreamPayload = Partial<BuildConversionResultDTO & AccountTaskProgressDTO & AccountTokenRefreshResultDTO & AccountImportResultDTO & BuildDetectItemDTO> & {
+type AccountTaskStreamPayload = Omit<Partial<BuildConversionResultDTO & AccountTaskProgressDTO & AccountTokenRefreshResultDTO & AccountImportResultDTO & BuildDetectItemDTO>, "outcome"> & {
   code?: string;
   message?: string;
-  outcome?: string;
+  outcome?: "ok" | "invalid" | "failed" | "revived" | "skipped" | "timeout";
+  timedOut?: number;
   reason?: string;
   httpStatus?: number;
   id?: string;
   name?: string;
   email?: string;
+  outputTokens?: number;
+  reasoningTokens?: number;
 };
 
 const decodeAccountTaskStreamPayload = createObjectDecoder<AccountTaskStreamPayload>("account task event", {
@@ -404,7 +409,8 @@ const decodeAccountTaskStreamPayload = createObjectDecoder<AccountTaskStreamPayl
   phase: isOptional(isOneOf("importing", "converting", "syncing")), updated: isOptional(isNumber), succeeded: isOptional(isNumber),
   code: isOptional(isString), message: isOptional(isString),
   id: isOptional(isString), name: isOptional(isString), email: isOptional(isString),
-  outcome: isOptional(isOneOf("ok", "invalid", "failed")), reason: isOptional(isString), httpStatus: isOptional(isNumber),
+  outcome: isOptional(isOneOf("ok", "invalid", "failed", "revived", "skipped", "timeout")), reason: isOptional(isString), httpStatus: isOptional(isNumber),
+  outputTokens: isOptional(isNumber), reasoningTokens: isOptional(isNumber), timedOut: isOptional(isNumber),
 });
 
 function hasNumericResult(value: AccountTaskStreamPayload, fields: string[]): boolean {
@@ -464,6 +470,57 @@ export function refreshAllAccountBilling(onProgress?: (value: AccountTaskProgres
 export type DetectBuildAccountsInput =
   | { all: true; ids?: never }
   | { all?: false; ids: string[] };
+
+export type QualityProbeHandlers = {
+  onProgress?: (value: AccountTaskProgressDTO) => void;
+  onItem?: (item: QualityProbeItemDTO) => void;
+};
+
+export async function probeQualityDisabledAccounts(ids: string[], handlers?: QualityProbeHandlers, signal?: AbortSignal): Promise<QualityProbeResultDTO> {
+  let result: QualityProbeResultDTO | undefined;
+  const progress = createAccountTaskProgressController({ onProgress: handlers?.onProgress });
+  try {
+    await apiEventStream("/api/admin/v1/accounts/batch/probe-quality", {
+      method: "POST",
+      headers: { Accept: "text/event-stream" },
+      body: { provider: "grok_build", ids },
+      signal,
+    }, decodeAccountTaskStreamPayload, ({ event, data }) => {
+      if (event === "progress" && typeof data.completed === "number" && typeof data.total === "number") {
+        progress.report({ completed: data.completed, total: data.total });
+        return;
+      }
+      if (event === "item" && typeof data.id === "string" && (data.outcome === "revived" || data.outcome === "failed" || data.outcome === "skipped" || data.outcome === "timeout")) {
+        handlers?.onItem?.({
+          id: data.id,
+          name: typeof data.name === "string" ? data.name : data.id,
+          outcome: data.outcome,
+          reason: data.reason,
+          outputTokens: data.outputTokens,
+          reasoningTokens: data.reasoningTokens,
+        });
+        return;
+      }
+      if (event === "complete") {
+        progress.flush();
+        if (hasNumericResult(data, ["succeeded", "failed", "skipped"])) {
+          result = { ...(data as QualityProbeResultDTO), timedOut: typeof data.timedOut === "number" ? data.timedOut : 0 };
+        }
+        return;
+      }
+      if (event === "error") {
+        const code = data.code ?? "accountQualityProbeFailed";
+        throw new ApiError(502, code, i18n.exists(`apiErrors.${code}`) ? i18n.t(`apiErrors.${code}`) : (data.message ?? i18n.t("apiErrors.requestFailed")));
+      }
+    });
+  } finally {
+    progress.dispose();
+  }
+  if (!result) {
+    throw new ApiError(502, "invalidResponse", i18n.t("apiErrors.invalidResponse"));
+  }
+  return result;
+}
 
 export function detectBuildAccounts(input: DetectBuildAccountsInput, handlers?: BuildDetectHandlers | ((value: AccountTaskProgressDTO) => void), signal?: AbortSignal): Promise<AccountBatchResultDTO> {
   const body = input.all ? { provider: "grok_build" as const, all: true } : { provider: "grok_build" as const, ids: input.ids };

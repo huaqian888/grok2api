@@ -1,9 +1,10 @@
 import { apiRequest } from "@/shared/api/client";
 import { createObjectDecoder, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
+import { exclusiveEndISO } from "@/features/audits/audit-range";
 import type { PeriodValue } from "@/shared/lib/period";
 import type { SortOrder } from "@/shared/lib/table-sort";
 
-export type AuditPeriod = PeriodValue;
+export type AuditPeriod = PeriodValue | "custom";
 
 export type AuditBillingComponentDTO = {
   kind: "uncached_input" | "cached_input" | "output" | "input_image" | "output_image" | "output_second";
@@ -171,7 +172,7 @@ const decodeAuditPage = createObjectDecoder<AuditCursorPageDTO>("audit page", {
   items: isArrayOf(auditValidator), pageSize: isNumber, nextCursor: isString, hasMore: isBoolean,
 });
 const decodeAuditSummary = createObjectDecoder<AuditSummaryDTO>("audit summary", {
-  period: isOneOf("24h", "7d", "30d", "90d"), generatedAt: isString, range: hasShape({ start: isString, end: isString }),
+  period: isOneOf("24h", "7d", "30d", "90d", "custom"), generatedAt: isString, range: hasShape({ start: isString, end: isString }),
   usage: hasShape({
     requests: isNumber, successfulRequests: isNumber, failedRequests: isNumber, inputTokens: isNumber,
     cachedInputTokens: isNumber, outputTokens: isNumber, reasoningTokens: isNumber, totalTokens: isNumber,
@@ -196,12 +197,15 @@ type AuditQuery = {
   key?: string;
   account?: string;
   period: AuditPeriod;
+  start?: string;
+  end?: string;
   sortBy?: string;
   sortOrder?: SortOrder;
 };
 
 export function getRequestAudits(input: AuditQuery, signal?: AbortSignal): Promise<AuditCursorPageDTO> {
-  const query = new URLSearchParams({ pagination: "cursor", pageSize: String(input.pageSize ?? 50), period: input.period });
+  const query = new URLSearchParams({ pagination: "cursor", pageSize: String(input.pageSize ?? 50) });
+  applyAuditTimeQuery(query, input);
   if (input.cursor) query.set("cursor", input.cursor);
   if (input.search) query.set("search", input.search);
   if (input.model) query.set("model", input.model);
@@ -217,7 +221,8 @@ export function getRequestAudits(input: AuditQuery, signal?: AbortSignal): Promi
 }
 
 export function getRequestAuditSummary(input: Omit<AuditQuery, "cursor" | "pageSize">, refresh = false, signal?: AbortSignal): Promise<AuditSummaryDTO> {
-  const query = new URLSearchParams({ period: input.period });
+  const query = new URLSearchParams();
+  applyAuditTimeQuery(query, input);
   if (input.search) query.set("search", input.search);
   if (input.model) query.set("model", input.model);
   if (input.status) query.set("status", input.status);
@@ -226,6 +231,16 @@ export function getRequestAuditSummary(input: Omit<AuditQuery, "cursor" | "pageS
   if (input.account) query.set("account", input.account);
   if (refresh) query.set("refresh", "1");
   return apiRequest(`/api/admin/v1/request-audits/summary?${query}`, { signal }, decodeAuditSummary);
+}
+
+function applyAuditTimeQuery(query: URLSearchParams, input: Pick<AuditQuery, "period" | "start" | "end">): void {
+  if (input.start && input.end) {
+    query.set("start", input.start);
+    query.set("end", exclusiveEndISO(input.end));
+    query.set("period", "custom");
+    return;
+  }
+  query.set("period", input.period);
 }
 
 export function getRequestAudit(id: string, signal?: AbortSignal): Promise<AuditDetailDTO> {

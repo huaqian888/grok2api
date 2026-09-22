@@ -1227,14 +1227,28 @@ func TestCandidatePlanPreservesSelectorOrdering(t *testing.T) {
 	}
 }
 
-func TestCandidatePlanPrefersKnownRemainingQuota(t *testing.T) {
+func TestCandidatePlanPrefersPriorityOverQuota(t *testing.T) {
 	values := []account.RoutingCandidate{
-		{Credential: account.Credential{ID: 1, Priority: 100}},
+		{Credential: account.Credential{ID: 1, Priority: 6}},
+		{Credential: account.Credential{ID: 2, Priority: 1}, QuotaWindow: &account.QuotaWindow{AccountID: 2, Mode: "console_image", Remaining: 2, Total: 5}},
+	}
+	scores := []candidateScore{{index: 0}, {index: 1, quotaKnown: true, quotaAvailable: true}}
+	if !candidateScoreBetter(values, scores[0], scores[1]) {
+		t.Fatal("higher priority did not outrank remaining quota")
+	}
+	if candidateScoreBetter(values, scores[1], scores[0]) {
+		t.Fatal("remaining quota outranked higher priority")
+	}
+}
+
+func TestCandidatePlanPrefersKnownRemainingQuotaWhenPriorityTied(t *testing.T) {
+	values := []account.RoutingCandidate{
+		{Credential: account.Credential{ID: 1, Priority: 1}},
 		{Credential: account.Credential{ID: 2, Priority: 1}, QuotaWindow: &account.QuotaWindow{AccountID: 2, Mode: "console_image", Remaining: 2, Total: 5}},
 	}
 	scores := []candidateScore{{index: 0}, {index: 1, quotaKnown: true, quotaAvailable: true}}
 	if !candidateScoreBetter(values, scores[1], scores[0]) {
-		t.Fatal("known remaining quota did not outrank an unknown window")
+		t.Fatal("known remaining quota did not outrank an unknown window at the same priority")
 	}
 }
 
@@ -1242,7 +1256,7 @@ func TestCandidatePlanDoesNotTreatEstimatedQuotaAsAuthoritative(t *testing.T) {
 	now := time.Now().UTC()
 	selector := NewSelector(nil, memory.NewConcurrencyLimiter(), nil, nil, time.Hour, time.Second, time.Minute)
 	values := []account.RoutingCandidate{
-		{Credential: account.Credential{ID: 1, Priority: 100}, QuotaWindow: &account.QuotaWindow{AccountID: 1, Mode: "console_image", Remaining: 5, Total: 5, Source: account.QuotaSourceEstimated}},
+		{Credential: account.Credential{ID: 1, Priority: 1}, QuotaWindow: &account.QuotaWindow{AccountID: 1, Mode: "console_image", Remaining: 5, Total: 5, Source: account.QuotaSourceEstimated}},
 		{Credential: account.Credential{ID: 2, Priority: 1}, QuotaWindow: &account.QuotaWindow{AccountID: 2, Mode: "console_image", Remaining: 1, Total: 5, Source: account.QuotaSourceUpstream}},
 	}
 	plan, err := selector.planCandidates(context.Background(), values, now, nil)
@@ -1259,7 +1273,7 @@ func TestCandidatePlanDoesNotTreatLegacyDefaultQuotaAsAuthoritative(t *testing.T
 	now := time.Now().UTC()
 	selector := NewSelector(nil, memory.NewConcurrencyLimiter(), nil, nil, time.Hour, time.Second, time.Minute)
 	values := []account.RoutingCandidate{
-		{Credential: account.Credential{ID: 1, Priority: 100}, QuotaWindow: &account.QuotaWindow{AccountID: 1, Mode: "console_image", Remaining: 5, Total: 5, Source: account.QuotaSourceDefault}},
+		{Credential: account.Credential{ID: 1, Priority: 1}, QuotaWindow: &account.QuotaWindow{AccountID: 1, Mode: "console_image", Remaining: 5, Total: 5, Source: account.QuotaSourceDefault}},
 		{Credential: account.Credential{ID: 2, Priority: 1}, QuotaWindow: &account.QuotaWindow{AccountID: 2, Mode: "console_image", Remaining: 1, Total: 5, Source: account.QuotaSourceUpstream}},
 	}
 	plan, err := selector.planCandidates(context.Background(), values, now, nil)
@@ -1674,6 +1688,58 @@ func TestMarkMissingThinkingCoolsThenDisables(t *testing.T) {
 	}
 }
 
+func TestMarkMissingThinkingDisablesProbationAccount(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "thinking-probation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accounts := relational.NewAccountRepository(database)
+	credential, _, err := accounts.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "probation", SourceKey: "probation", EncryptedAccessToken: "encrypted", Enabled: true,
+		AuthStatus: account.AuthStatusActive, Priority: 10, MaxConcurrent: 1, LastError: account.LastErrorThinkingProbation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.UpdateHealth(ctx, credential.ID, credential.Provider, 0, nil, account.LastErrorThinkingProbation, true); err != nil {
+		t.Fatal(err)
+	}
+	credential, err = accounts.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector := NewSelector(accounts, memory.NewConcurrencyLimiter(), memory.NewStickyStore(), nil, time.Hour, 30*time.Second, 30*time.Minute, 500*time.Millisecond)
+	if action, err := selector.markMissingThinking(ctx, credential, time.Hour); err != nil || action != missingThinkingPenaltyDisabled {
+		t.Fatalf("probation first miss = (%s, %v)", action, err)
+	}
+	got, err := accounts.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled || got.LastError != lastErrorMissingThinkingDisabled {
+		t.Fatalf("probation miss must disable immediately, got %#v", got)
+	}
+}
+
+func TestCandidatePlanDefersThinkingProbationAccounts(t *testing.T) {
+	healthy := account.RoutingCandidate{Credential: account.Credential{ID: 2, Priority: 1, MaxConcurrent: 8}, SupportsModel: true, ModelCapabilityKnown: true}
+	probation := account.RoutingCandidate{Credential: account.Credential{ID: 1, Priority: 1, MaxConcurrent: 8, LastError: account.LastErrorThinkingProbation}, SupportsModel: true, ModelCapabilityKnown: true}
+	values := []account.RoutingCandidate{probation, healthy}
+	idleProbation := candidateScore{index: 0, inFlight: 0}
+	busyHealthy := candidateScore{index: 1, inFlight: 3}
+	if !candidateScoreBetter(values, busyHealthy, idleProbation) {
+		t.Fatal("busy healthy accounts must still outrank idle revived probation accounts")
+	}
+	if candidateScoreBetter(values, idleProbation, busyHealthy) {
+		t.Fatal("idle probation must not outrank busy healthy")
+	}
+}
+
 func TestMarkFailureSoftNetworkCooldown(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "soft-network.db"))
@@ -1803,7 +1869,7 @@ func TestMarkFailureSoftNetworkCooldown(t *testing.T) {
 func TestBoundUpstreamRetryAfter(t *testing.T) {
 	selector := &Selector{cooldownMax: time.Minute}
 	tests := []struct {
-		name string
+		name  string
 		input time.Duration
 		want  time.Duration
 	}{

@@ -97,12 +97,6 @@ func segmentedSelectorCohortBetter(left, right segmentedSelectorCohort) bool {
 	if left.capabilityKnown != right.capabilityKnown {
 		return left.capabilityKnown
 	}
-	if left.quotaAvailable != right.quotaAvailable {
-		return left.quotaAvailable
-	}
-	if left.quotaKnown != right.quotaKnown {
-		return left.quotaKnown
-	}
 	if left.preferFreeBuild != right.preferFreeBuild {
 		return left.preferFreeBuild
 	}
@@ -111,6 +105,12 @@ func segmentedSelectorCohortBetter(left, right segmentedSelectorCohort) bool {
 	}
 	if left.priority != right.priority {
 		return left.priority > right.priority
+	}
+	if left.quotaAvailable != right.quotaAvailable {
+		return left.quotaAvailable
+	}
+	if left.quotaKnown != right.quotaKnown {
+		return left.quotaKnown
 	}
 	if left.billingFresh != right.billingFresh {
 		return left.billingFresh

@@ -693,6 +693,16 @@ func (r *ModelRepository) ReplaceAccountCapabilities(ctx context.Context, accoun
 	return err
 }
 
+func (r *ModelRepository) ListAccountCapabilityModels(ctx context.Context, accountID uint64) ([]string, error) {
+	var models []string
+	err := r.db.db.WithContext(ctx).
+		Model(&accountModelCapabilityModel{}).
+		Where("account_id = ?", accountID).
+		Order("upstream_model ASC").
+		Pluck("upstream_model", &models).Error
+	return models, err
+}
+
 func (r *ModelRepository) MarkAccountCapabilitySyncFailed(ctx context.Context, accountID uint64, attemptedAt time.Time, message string) error {
 	state := accountModelSyncStateModel{AccountID: accountID, LastAttemptAt: attemptedAt, LastError: truncate(message, 512)}
 	return r.db.db.WithContext(ctx).Clauses(clause.OnConflict{

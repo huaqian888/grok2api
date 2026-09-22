@@ -46,6 +46,7 @@ const (
 type Handler struct {
 	service *accountapp.Service
 	sync    accountSynchronizer
+	prober  disabledAccountProber
 }
 
 type accountSyncPipeline struct {
@@ -159,6 +160,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/batch/reset-quota", h.batchResetQuota)
 	router.POST("/accounts/batch/refresh-quotas", h.batchRefreshQuotas)
 	router.POST("/accounts/batch/refresh-tokens", h.batchRefreshTokens)
+	router.POST("/accounts/batch/probe-quality", h.probeQualityDisabled)
 	router.POST("/accounts/detect", h.detectBuildAccounts)
 	router.PATCH("/accounts/batch", h.batchUpdate)
 	router.POST("/accounts/deletion-preview", h.previewDeletion)

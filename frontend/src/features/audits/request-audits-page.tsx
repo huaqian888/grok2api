@@ -13,13 +13,14 @@ import { listClientKeys } from "@/features/client-keys/client-keys-api";
 import { listAccounts } from "@/features/accounts/accounts-api";
 import { RequestAuditDetailDialog } from "@/features/audits/request-audit-detail-dialog";
 import { buildAuditUsageView } from "@/features/audits/audit-usage";
+import { AuditPeriodControl } from "@/features/audits/audit-period-control";
+import { type AuditCustomRange } from "@/features/audits/audit-range";
 import { getRequestAudits, getRequestAuditSummary, type AuditBillingBreakdownDTO, type AuditBillingComponentDTO, type AuditDTO, type AuditPeriod } from "@/features/audits/request-audits-api";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
 import { CursorPagination } from "@/shared/components/pagination";
 import { PageHeader } from "@/shared/components/page-header";
-import { PeriodSelector } from "@/shared/components/period-selector";
 import { SortableTableHead } from "@/shared/components/sortable-table-head";
 import { VirtualTableBody } from "@/shared/components/virtual-table-body";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
@@ -48,6 +49,7 @@ export function RequestAuditsPage() {
   const [keyFilter, setKeyFilter] = useState("");
   const [accountFilter, setAccountFilter] = useState("");
   const [periodDays, setPeriodDays] = useState<PeriodDays>(1);
+  const [customRange, setCustomRange] = useState<AuditCustomRange | null>(null);
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [selectedAudit, setSelectedAudit] = useState<AuditDTO | null>(null);
@@ -55,11 +57,11 @@ export function RequestAuditsPage() {
   const debouncedSearch = useDebouncedValue(search);
   const debouncedKeyFilter = useDebouncedValue(keyFilter);
   const debouncedAccountFilter = useDebouncedValue(accountFilter);
-  const period: AuditPeriod = toPeriodValue(periodDays);
+  const period: AuditPeriod = customRange ? "custom" : toPeriodValue(periodDays);
   const cursorScope = useMemo(() => JSON.stringify([
     pageSize, debouncedSearch, modelFilter, statusFilter, modeFilter,
-    debouncedKeyFilter, debouncedAccountFilter, period, sort.field, sort.order,
-  ]), [pageSize, debouncedSearch, modelFilter, statusFilter, modeFilter, debouncedKeyFilter, debouncedAccountFilter, period, sort.field, sort.order]);
+    debouncedKeyFilter, debouncedAccountFilter, period, customRange?.start, customRange?.end, sort.field, sort.order,
+  ]), [pageSize, debouncedSearch, modelFilter, statusFilter, modeFilter, debouncedKeyFilter, debouncedAccountFilter, period, customRange, sort.field, sort.order]);
   const [cursorState, setCursorState] = useState<AuditCursorState>(() => ({ scope: cursorScope, values: [""] }));
   if (cursorState.scope !== cursorScope) {
     setCursorState({ scope: cursorScope, values: [""] });
@@ -76,14 +78,14 @@ export function RequestAuditsPage() {
 
   const auditsQuery = useQuery({
     queryKey: ["request-audits", "cursor", cursorScope, cursor],
-    queryFn: ({ signal }) => getRequestAudits({ cursor, pageSize, search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period, sortBy: sort.field, sortOrder: sort.order }, signal),
+    queryFn: ({ signal }) => getRequestAudits({ cursor, pageSize, search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period, start: customRange?.start, end: customRange?.end, sortBy: sort.field, sortOrder: sort.order }, signal),
     placeholderData: (previous, previousQuery) => previousQuery?.queryKey[2] === cursorScope ? previous : undefined,
     gcTime: AUDIT_PAGE_CACHE_TIME_MS,
     structuralSharing: false,
   });
   const summaryQuery = useQuery({
-    queryKey: ["request-audits", "summary", debouncedSearch, modelFilter, statusFilter, modeFilter, debouncedKeyFilter, debouncedAccountFilter, period],
-    queryFn: ({ signal }) => getRequestAuditSummary({ search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period }, forceSummaryRefresh.current, signal),
+    queryKey: ["request-audits", "summary", debouncedSearch, modelFilter, statusFilter, modeFilter, debouncedKeyFilter, debouncedAccountFilter, period, customRange?.start, customRange?.end],
+    queryFn: ({ signal }) => getRequestAuditSummary({ search: debouncedSearch, model: modelFilter, status: statusFilter, mode: modeFilter, key: debouncedKeyFilter, account: debouncedAccountFilter, period, start: customRange?.start, end: customRange?.end }, forceSummaryRefresh.current, signal),
     placeholderData: (previous) => previous,
     gcTime: AUDIT_SUMMARY_CACHE_TIME_MS,
   });
@@ -186,7 +188,7 @@ export function RequestAuditsPage() {
         description={t("audits.description")}
         actions={(
           <>
-            <PeriodSelector value={periodDays} onChange={setPeriodDays} ariaLabel={t("audits.usageSummary")} />
+            <AuditPeriodControl periodDays={periodDays} customRange={customRange} onPeriodDaysChange={setPeriodDays} onCustomRangeChange={setCustomRange} />
             <Button variant="secondary" size="sm" onClick={refreshAll} disabled={auditsQuery.isFetching || summaryQuery.isFetching || manualRefreshing}><RefreshCw className={manualRefreshing || auditsQuery.isFetching || summaryQuery.isFetching ? "animate-spin" : undefined} />{t("common.refresh")}</Button>
           </>
         )}
@@ -196,7 +198,7 @@ export function RequestAuditsPage() {
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <AuditMetric icon={Activity} loading={summaryLoading} label={t("audits.totalRequests")} value={formatNumber(summary?.usage.requests ?? 0, i18n.language, 0)} detail={t("audits.requestBreakdown", { success: formatNumber(summary?.usage.successfulRequests ?? 0, i18n.language, 0), failed: formatNumber(summary?.usage.failedRequests ?? 0, i18n.language, 0) })} />
           <AuditMetric icon={WholeWord} loading={summaryLoading} label={t("audits.totalTokens")} value={formatNumber(summary?.usage.totalTokens ?? 0, i18n.language, 0)} detail={t("audits.tokenEfficiency", { cacheRate: formatNumber(cacheRate, i18n.language, 1) })} />
-          <AuditMetric icon={CircleCheck} loading={summaryLoading} label={t("audits.successRate")} value={`${formatNumber(summary?.usage.successRate ?? 0, i18n.language, 1)}%`} detail={t("audits.averageDuration", { duration: formatDuration(summary?.usage.averageDurationMs ?? 0) })} />
+          <AuditMetric icon={CircleCheck} loading={summaryLoading} label={t("audits.successRate")} tooltip={t("audits.successRateHint")} value={`${formatNumber(summary?.usage.successRate ?? 0, i18n.language, 1)}%`} detail={t("audits.averageDuration", { duration: formatDuration(summary?.usage.averageDurationMs ?? 0) })} />
           <AuditMetric
             icon={CircleDollarSign}
             loading={summaryLoading}

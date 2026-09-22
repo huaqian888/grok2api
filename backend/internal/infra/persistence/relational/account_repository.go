@@ -1013,13 +1013,26 @@ func (r *AccountRepository) Get(ctx context.Context, id uint64) (account.Credent
 // after routing has selected it. Routing candidate queries intentionally never
 // load these encrypted columns.
 func (r *AccountRepository) GetCredentialMaterial(ctx context.Context, accountID uint64, provider account.Provider) (account.CredentialMaterial, error) {
-	var row accountCredentialModel
-	if err := r.db.db.WithContext(ctx).
+	return r.getCredentialMaterial(ctx, accountID, provider, false)
+}
+
+// GetCredentialMaterialIncludingDisabled hydrates tokens for a quality-revival
+// probe. Routing still cannot select the account until Enabled is restored.
+func (r *AccountRepository) GetCredentialMaterialIncludingDisabled(ctx context.Context, accountID uint64, provider account.Provider) (account.CredentialMaterial, error) {
+	return r.getCredentialMaterial(ctx, accountID, provider, true)
+}
+
+func (r *AccountRepository) getCredentialMaterial(ctx context.Context, accountID uint64, provider account.Provider, includeDisabled bool) (account.CredentialMaterial, error) {
+	query := r.db.db.WithContext(ctx).
 		Table("account_credentials AS credential").
 		Select("credential.*").
 		Joins("JOIN provider_accounts AS account ON account.id = credential.account_id").
-		Where("credential.account_id = ? AND account.provider = ? AND account.enabled = TRUE AND account.auth_status = ?", accountID, provider, account.AuthStatusActive).
-		Take(&row).Error; err != nil {
+		Where("credential.account_id = ? AND account.provider = ? AND account.auth_status = ?", accountID, provider, account.AuthStatusActive)
+	if !includeDisabled {
+		query = query.Where("account.enabled = TRUE")
+	}
+	var row accountCredentialModel
+	if err := query.Take(&row).Error; err != nil {
 		return account.CredentialMaterial{}, mapError(err)
 	}
 	return toCredentialMaterialDomain(row, provider), nil

@@ -281,6 +281,7 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 	service.UpdateQualityRetry(QualityRetryRuntime{
 		Enabled: true, MaxAttempts: 2, MinOutputTokens: 32,
 		OnExhausted: qualityRetryFailClosed, HoldTimeout: time.Second,
+		NewAccountGrace: time.Nanosecond,
 	})
 	adapter.resetAttempts()
 	tuiCompacted, err := service.CreateResponse(ctx, Input{

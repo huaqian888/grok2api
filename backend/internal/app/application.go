@@ -499,8 +499,18 @@ func qualityRetryRuntime(value config.QualityGuardRequestRetryConfig) gateway.Qu
 		OnExhausted:                     value.OnExhausted,
 		AccountCooldown:                 value.AccountCooldown.Value(),
 		IdleAccountCooldown:             value.IdleAccountCooldown.Value(),
+		NewAccountGrace:                 value.NewAccountGrace.Value(),
 		MinEncryptedBytes:               value.MinEncryptedBytes,
 		EncryptedBytesPerReasoningToken: value.EncryptedBytesPerReasoningToken,
+		DisabledRevival: gateway.DisabledAccountRevivalRuntime{
+			Enabled:        value.DisabledRevival.Enabled,
+			Interval:       value.DisabledRevival.Interval.Value(),
+			BatchSize:      value.DisabledRevival.BatchSize,
+			Concurrency:    value.DisabledRevival.Concurrency,
+			MinDisabledAge: value.DisabledRevival.MinDisabledAge.Value(),
+			FailRetryAfter: value.DisabledRevival.FailRetryAfter.Value(),
+			Timeout:        value.DisabledRevival.Timeout.Value(),
+		},
 	}
 }
 
@@ -644,6 +654,10 @@ func (a *Application) Run(ctx context.Context) error {
 	})
 	startBackground("video_recovery", func(taskCtx context.Context) error {
 		a.gateway.RunVideoRecovery(taskCtx)
+		return nil
+	})
+	startBackground("disabled_account_revival", func(taskCtx context.Context) error {
+		a.gateway.RunDisabledAccountRevival(taskCtx)
 		return nil
 	})
 	startBackground("video_workers", func(taskCtx context.Context) error {

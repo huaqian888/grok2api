@@ -116,12 +116,15 @@ const (
 const (
 	LastErrorMissingThinking         = "missing_thinking"
 	LastErrorMissingThinkingDisabled = "missing_thinking_disabled"
+	// LastErrorThinkingProbation marks a quality-revived account that has
+	// not yet produced thinking on a live user request.
+	LastErrorThinkingProbation = "thinking_probation"
 )
 
 // NormalizeHealthMarker admits only durable non-sensitive health markers.
 func NormalizeHealthMarker(value string) string {
 	switch value {
-	case LastErrorMissingThinking, LastErrorMissingThinkingDisabled:
+	case LastErrorMissingThinking, LastErrorMissingThinkingDisabled, LastErrorThinkingProbation:
 		return value
 	default:
 		return ""

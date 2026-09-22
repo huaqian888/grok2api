@@ -216,7 +216,7 @@ func (h *Handler) listCursor(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, auditapp.ErrInvalidPeriod) {
-		response.Error(c, http.StatusBadRequest, "invalidAuditPeriod", "period 仅支持 24h、7d、30d、90d")
+		response.Error(c, http.StatusBadRequest, "invalidAuditPeriod", "period 仅支持 24h、7d、30d、90d，或同时提供 RFC3339 的 start 与 end（最长 365 天）")
 		return
 	}
 	if err != nil {
@@ -317,7 +317,7 @@ func (h *Handler) summary(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, auditapp.ErrInvalidPeriod) {
-		response.Error(c, http.StatusBadRequest, "invalidAuditPeriod", "period 仅支持 24h、7d、30d、90d")
+		response.Error(c, http.StatusBadRequest, "invalidAuditPeriod", "period 仅支持 24h、7d、30d、90d，或同时提供 RFC3339 的 start 与 end（最长 365 天）")
 		return
 	}
 	if err != nil {
@@ -473,7 +473,8 @@ func newListFilter(c *gin.Context) auditapp.ListFilter {
 	return auditapp.ListFilter{
 		Model: c.Query("model"), Status: c.Query("status"), Mode: c.Query("mode"),
 		Key: c.Query("key"), Account: c.Query("account"),
-		Sort: repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))},
+		Sort:  repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))},
+		Start: c.Query("start"), End: c.Query("end"),
 	}
 }
 

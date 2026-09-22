@@ -166,7 +166,7 @@ qualityGuard:
   # is max(minEncryptedBytes, reasoning_tokens * encryptedBytesPerReasoningToken).
   requestRetry:
     enabled: false
-    maxAttempts: 6
+    maxAttempts: 3
     holdTimeout: 30s
     minOutputTokens: 8
     onExhausted: fail_closed # fail_open | fail_closed
@@ -177,5 +177,18 @@ qualityGuard:
     # Single-account pools should set this lower; toggling enabled does not
     # clear cooldown — use POST /api/admin/v1/accounts/:id/clear-cooldown.
     idleAccountCooldown: 15m
+    # Skip quality cooldowns for newly created accounts. Zero uses 12h.
+    # Requests can still withhold/retry; the new account is not cooled.
+    newAccountGrace: 12h
     minEncryptedBytes: 256
     encryptedBytesPerReasoningToken: 4
+    # Periodically probe quality-disabled Build accounts and re-enable
+    # those that still produce thinking. Bounded parallel batches.
+    disabledRevival:
+      enabled: false
+      interval: 15m
+      batchSize: 100
+      concurrency: 32
+      minDisabledAge: 30m
+      failRetryAfter: 6h
+      timeout: 120s

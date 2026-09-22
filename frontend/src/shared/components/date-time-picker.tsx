@@ -17,10 +17,12 @@ type DateTimePickerProps = {
   onChange: (value: string) => void
   placeholder?: string
   disabled?: boolean
+  timeLabel?: string
 }
 
-export function DateTimePicker({ value, onChange, placeholder, disabled = false }: DateTimePickerProps) {
+export function DateTimePicker({ value, onChange, placeholder, disabled = false, timeLabel }: DateTimePickerProps) {
   const { t, i18n } = useTranslation()
+  const clockLabel = timeLabel ?? t("keys.expiryTime")
   const selected = parseLocalDateTime(value)
   const isChinese = i18n.language.toLowerCase().startsWith("zh")
   const timeParts = getTimeParts(selected)
@@ -66,13 +68,13 @@ export function DateTimePicker({ value, onChange, placeholder, disabled = false 
           locale={isChinese ? zhCNDayPicker : enUSDayPicker}
         />
         <div className="flex items-center gap-2 border-t px-3 py-2">
-          <span className="text-xs text-muted-foreground">{t("keys.expiryTime")}</span>
+          <span className="text-xs text-muted-foreground">{clockLabel}</span>
           <div className="ml-auto flex items-center gap-1 text-xs">
             {timeParts.map((part, index) => (
               <div className="contents" key={index}>
                 {index > 0 ? <span className="text-muted-foreground">:</span> : null}
                 <Input
-                  aria-label={`${t("keys.expiryTime")} ${index === 0 ? "HH" : index === 1 ? "MM" : "SS"}`}
+                  aria-label={`${clockLabel} ${index === 0 ? "HH" : index === 1 ? "MM" : "SS"}`}
                   className="h-7 w-9 bg-background px-1 text-center text-xs tabular-nums"
                   inputMode="numeric"
                   maxLength={2}

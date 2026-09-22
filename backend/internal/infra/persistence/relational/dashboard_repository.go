@@ -92,7 +92,7 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 		result.Resources.ActiveClientKeys = clientKeys.Active
 		result.Resources.TotalClientKeys = clientKeys.Total
 
-		if err := tx.Model(&requestAuditModel{}).
+		if err := excludeQualityGuardProbes(tx.Model(&requestAuditModel{})).
 			Select(dashboardUsageAggregateSelect).
 			Where("created_at >= ? AND created_at < ?", start, end).
 			Scan(&result.Usage).Error; err != nil {
@@ -109,7 +109,7 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 			Tokens             int64
 			BilledCostUSDTicks int64
 		}
-		if err := tx.Model(&requestAuditModel{}).
+		if err := excludeQualityGuardProbes(tx.Model(&requestAuditModel{})).
 			Select(bucketExpression+" AS bucket_index, COUNT(*) AS requests, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(total_tokens), 0) AS tokens, COALESCE(SUM(CASE WHEN cost_in_usd_ticks > 0 THEN cost_in_usd_ticks ELSE estimated_cost_in_usd_ticks END), 0) AS billed_cost_usd_ticks", bucketArgs...).
 			Where("created_at >= ? AND created_at < ?", start, end).
 			Group("bucket_index").
@@ -126,7 +126,7 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 			BucketIndex int `gorm:"column:bucket_index"`
 			Requests    int64
 		}
-		if err := tx.Model(&requestAuditModel{}).
+		if err := excludeQualityGuardProbes(tx.Model(&requestAuditModel{})).
 			Select(activityExpression+" AS bucket_index, COUNT(*) AS requests", activityArgs...).
 			Where("created_at >= ? AND created_at < ?", window.ActivityBoundaries[0], window.ActivityBoundaries[len(window.ActivityBoundaries)-1]).
 			Group("bucket_index").
@@ -145,7 +145,7 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 			SuccessfulRequests int64
 			Tokens             int64
 		}
-		if err := tx.Model(&requestAuditModel{}).
+		if err := excludeQualityGuardProbes(tx.Model(&requestAuditModel{})).
 			Select("provider, COUNT(*) AS requests, "+auditSuccessAggregate+" AS successful_requests, COALESCE(SUM(total_tokens), 0) AS tokens").
 			Where("created_at >= ? AND created_at < ?", start, end).
 			Group("provider").
@@ -169,7 +169,7 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, window repository.Da
 			Tokens             int64
 			BilledCostUSDTicks int64
 		}
-		if err := tx.Model(&requestAuditModel{}).
+		if err := excludeQualityGuardProbes(tx.Model(&requestAuditModel{})).
 			Select(modelExpression+" AS model, COUNT(*) AS requests, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens, COALESCE(SUM(total_tokens), 0) AS tokens, COALESCE(SUM(CASE WHEN cost_in_usd_ticks > 0 THEN cost_in_usd_ticks ELSE estimated_cost_in_usd_ticks END), 0) AS billed_cost_usd_ticks").
 			Where("created_at >= ? AND created_at < ?", start, end).
 			Group(modelExpression).

@@ -76,15 +76,6 @@ func candidateScoreBetter(values []account.RoutingCandidate, leftScore, rightSco
 	if leftKnown != rightKnown {
 		return leftKnown
 	}
-	// A synced remote window with remaining quota is a stronger routing signal
-	// than priority or tier. Unknown windows remain eligible as a fallback, but
-	// cannot displace an account whose requested mode is known to be available.
-	if leftScore.quotaAvailable != rightScore.quotaAvailable {
-		return leftScore.quotaAvailable
-	}
-	if leftScore.quotaKnown != rightScore.quotaKnown {
-		return leftScore.quotaKnown
-	}
 	if leftScore.preferFreeBuild != rightScore.preferFreeBuild {
 		return leftScore.preferFreeBuild
 	}
@@ -94,8 +85,21 @@ func candidateScoreBetter(values []account.RoutingCandidate, leftScore, rightSco
 	if left.Priority != right.Priority {
 		return left.Priority > right.Priority
 	}
+	// Same-priority accounts still prefer a synced upstream window with remaining
+	// quota over unknown, estimated, or exhausted windows.
+	if leftScore.quotaAvailable != rightScore.quotaAvailable {
+		return leftScore.quotaAvailable
+	}
+	if leftScore.quotaKnown != rightScore.quotaKnown {
+		return leftScore.quotaKnown
+	}
 	if leftScore.billingFresh != rightScore.billingFresh {
 		return leftScore.billingFresh
+	}
+	leftProbation := left.LastError == account.LastErrorThinkingProbation
+	rightProbation := right.LastError == account.LastErrorThinkingProbation
+	if leftProbation != rightProbation {
+		return !leftProbation
 	}
 	if leftScore.inFlight != rightScore.inFlight {
 		return leftScore.inFlight < rightScore.inFlight

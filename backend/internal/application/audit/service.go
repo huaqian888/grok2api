@@ -65,6 +65,7 @@ const (
 	Period7Days   Period = "7d"
 	Period30Days  Period = "30d"
 	Period90Days  Period = "90d"
+	PeriodCustom  Period = "custom"
 )
 
 const (
@@ -82,6 +83,7 @@ const (
 	requestHeaderValuesLimit = 32
 	requestHeaderCountLimit  = 128
 	requestHeadersLimit      = 32 << 10
+	maxCustomAuditRange      = 365*24*time.Hour + time.Second
 )
 
 type auditWriteRequest struct {
@@ -501,6 +503,8 @@ type ListFilter struct {
 	Key     string
 	Account string
 	Sort    repository.SortQuery
+	Start   string
+	End     string
 }
 
 type auditCursorPayload struct {
@@ -524,7 +528,7 @@ func (s *Service) ListCursor(ctx context.Context, rawCursor string, pageSize int
 	if err != nil {
 		return CursorResult{}, err
 	}
-	_, start, end, err := s.resolvePeriod(rawPeriod)
+	_, start, end, err := s.resolveTimeRange(rawPeriod, filter.Start, filter.End)
 	if err != nil {
 		return CursorResult{}, err
 	}
@@ -652,14 +656,14 @@ func (s *Service) summary(ctx context.Context, search, rawPeriod string, filter 
 	if !validAuditFilter(filter.Status, "", "success", "clientError", "serverError", "2xx", "4xx", "5xx", "other") || !validAuditFilter(filter.Mode, "", "stream", "nonStream") {
 		return SummaryResult{}, ErrInvalidFilter
 	}
-	period, start, end, err := s.resolvePeriod(rawPeriod)
+	period, start, end, err := s.resolveTimeRange(rawPeriod, filter.Start, filter.End)
 	if err != nil {
 		return SummaryResult{}, err
 	}
 	if !useCache {
 		return s.loadSummary(ctx, search, filter, period, start, end)
 	}
-	cacheKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s", period, search, filter.Model, filter.Status, filter.Mode, filter.Key, filter.Account)
+	cacheKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s", period, start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano), search, filter.Model, filter.Status, filter.Mode, filter.Key, filter.Account)
 	return s.summaryCache.Load(ctx, cacheKey, end, func() (SummaryResult, error) {
 		return s.loadSummary(ctx, search, filter, period, start, end)
 	})
@@ -687,12 +691,47 @@ func (s *Service) loadSummary(ctx context.Context, search string, filter ListFil
 }
 
 func (s *Service) resolvePeriod(value string) (Period, time.Time, time.Time, error) {
-	period, duration, err := parsePeriod(value)
+	return s.resolveTimeRange(value, "", "")
+}
+
+func (s *Service) resolveTimeRange(rawPeriod, rawStart, rawEnd string) (Period, time.Time, time.Time, error) {
+	startValue := strings.TrimSpace(rawStart)
+	endValue := strings.TrimSpace(rawEnd)
+	if startValue != "" || endValue != "" {
+		if startValue == "" || endValue == "" {
+			return "", time.Time{}, time.Time{}, ErrInvalidPeriod
+		}
+		start, err := parseAuditTime(startValue)
+		if err != nil {
+			return "", time.Time{}, time.Time{}, ErrInvalidPeriod
+		}
+		end, err := parseAuditTime(endValue)
+		if err != nil {
+			return "", time.Time{}, time.Time{}, ErrInvalidPeriod
+		}
+		if !end.After(start) || end.Sub(start) > maxCustomAuditRange {
+			return "", time.Time{}, time.Time{}, ErrInvalidPeriod
+		}
+		return PeriodCustom, start.UTC(), end.UTC(), nil
+	}
+	period, duration, err := parsePeriod(rawPeriod)
 	if err != nil {
 		return "", time.Time{}, time.Time{}, err
 	}
 	end := s.now().UTC()
 	return period, end.Add(-duration), end, nil
+}
+
+func parseAuditTime(value string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05Z07:00"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed, nil
+		}
+	}
+	if parsed, err := time.ParseInLocation("2006-01-02T15:04:05", value, time.UTC); err == nil {
+		return parsed, nil
+	}
+	return time.Time{}, ErrInvalidPeriod
 }
 
 func parsePeriod(value string) (Period, time.Duration, error) {

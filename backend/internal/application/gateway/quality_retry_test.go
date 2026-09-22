@@ -638,7 +638,7 @@ func TestPeekQualityStreamThinkingDeliversRemainder(t *testing.T) {
 		`data: {"choices":[{"delta":{"content":"answer after think"}}]}`,
 		"data: [DONE]",
 	)))
-	replay, verdict, _, _, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second})
+	replay, verdict, _, _, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second, NewAccountGrace: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +735,7 @@ func TestPeekQualityStreamWithholdsNoThinkEnough(t *testing.T) {
 		`data: {"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":0}}}`,
 		"data: [DONE]",
 	)))
-	replay, verdict, usage, _, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second})
+	replay, verdict, usage, _, err := peekQualityStream(context.Background(), body, qualityProtocolChat, QualityRetryRuntime{MinOutputTokens: 32, HoldTimeout: time.Second, NewAccountGrace: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1484,6 +1484,7 @@ func TestAttemptLoopQualityHoldPreservesReplaySafety(t *testing.T) {
 			service.UpdateQualityRetry(QualityRetryRuntime{
 				Enabled: true, MaxAttempts: 2, MinOutputTokens: 8,
 				OnExhausted: test.onExhausted, HoldTimeout: time.Second,
+				NewAccountGrace: time.Nanosecond,
 			})
 
 			input := Input{
@@ -1586,7 +1587,7 @@ func TestAttemptLoopQualityHold(t *testing.T) {
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
-	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 3, MinOutputTokens: 32, OnExhausted: qualityRetryFailOpen, HoldTimeout: time.Second})
+	service.UpdateQualityRetry(QualityRetryRuntime{Enabled: true, MaxAttempts: 3, MinOutputTokens: 32, OnExhausted: qualityRetryFailOpen, HoldTimeout: time.Second, NewAccountGrace: time.Nanosecond})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
 		RequestID: "req-quality-hold", ClientKey: clientKey, PublicModel: "grok-4.6", Streaming: true,
@@ -1707,6 +1708,7 @@ func TestAttemptLoopQualityHoldFailOpenKeepsSingleAccountBody(t *testing.T) {
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 	service.UpdateQualityRetry(QualityRetryRuntime{
 		Enabled: true, MaxAttempts: 6, MinOutputTokens: 32, OnExhausted: qualityRetryFailOpen, HoldTimeout: time.Second,
+		NewAccountGrace: time.Nanosecond,
 	})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
@@ -1801,6 +1803,7 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 999)
 	service.UpdateQualityRetry(QualityRetryRuntime{
 		Enabled: true, MaxAttempts: 6, MinOutputTokens: 32, OnExhausted: qualityRetryFailOpen, HoldTimeout: time.Second,
+		NewAccountGrace: time.Nanosecond,
 	})
 
 	result, err := service.CreateChatCompletion(ctx, Input{
@@ -1833,10 +1836,35 @@ func TestAttemptLoopQualityFailOpenFallbackAndTotalAttemptCap(t *testing.T) {
 	}
 }
 
+func TestSkipQualityPenaltyForNewAccount(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	cases := []struct {
+		name      string
+		createdAt time.Time
+		grace     time.Duration
+		want      bool
+	}{
+		{name: "zero created at never skips", createdAt: time.Time{}, grace: 12 * time.Hour, want: false},
+		{name: "fresh account within grace", createdAt: now.Add(-time.Minute), grace: 12 * time.Hour, want: true},
+		{name: "account older than grace", createdAt: now.Add(-13 * time.Hour), grace: 12 * time.Hour, want: false},
+		{name: "zero grace still defaults to 12h", createdAt: now.Add(-time.Minute), grace: 0, want: true},
+		{name: "13h old with zero grace uses 12h default", createdAt: now.Add(-13 * time.Hour), grace: 0, want: false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got := skipQualityPenaltyForNewAccount(accountdomain.Credential{CreatedAt: test.createdAt}, test.grace)
+			if got != test.want {
+				t.Fatalf("skip=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeQualityRetryDefaults(t *testing.T) {
 	t.Parallel()
 	got := normalizeQualityRetry(QualityRetryRuntime{Enabled: true})
-	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 8 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 30*time.Second || got.AccountCooldown != 12*time.Hour || got.IdleAccountCooldown != 15*time.Minute || got.MinEncryptedBytes != defaultMinEncryptedBytes || got.EncryptedBytesPerReasoningToken != defaultEncryptedBytesPerReasoningToken {
+	if !got.Enabled || got.MaxAttempts != 6 || got.MinOutputTokens != 8 || got.OnExhausted != qualityRetryFailClosed || got.HoldTimeout != 30*time.Second || got.AccountCooldown != 12*time.Hour || got.IdleAccountCooldown != 15*time.Minute || got.NewAccountGrace != 12*time.Hour || got.MinEncryptedBytes != defaultMinEncryptedBytes || got.EncryptedBytesPerReasoningToken != defaultEncryptedBytesPerReasoningToken {
 		t.Fatalf("defaults = %#v", got)
 	}
 }

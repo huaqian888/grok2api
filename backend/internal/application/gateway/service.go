@@ -129,6 +129,9 @@ type Input struct {
 	// ForcedAccountID is paired with ForcedEgressNodeID only by the internal
 	// Quality Guard recovery path. It never accepts public request input.
 	ForcedAccountID uint64
+	// accountRevivalProbe pins a disabled quality-struck account without
+	// putting it in the live scheduling pool. Internal worker only.
+	accountRevivalProbe bool
 }
 
 type Usage struct {
@@ -228,6 +231,9 @@ type Service struct {
 	modelSyncing                map[uint64]struct{}
 	markBuildChatDeniedAsReauth atomic.Bool
 	qualityRetry                atomic.Pointer[QualityRetryRuntime]
+	disabledRevivalMu           sync.Mutex
+	disabledRevivalLastRun      time.Time
+	disabledRevivalAfterID      uint64
 }
 
 type teamModelRateLimit struct {
@@ -1074,11 +1080,17 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				lease.completeSelectorObservation(successful)
 				budget := newFinalizationBudget(string(operation), string(route.Provider))
 				if isUpstreamStreamFailure(errorCode) {
-					status, retryAfter := streamFailureHealthPenalty(errorCode, usage, s.qualityRetryConfig().IdleAccountCooldown)
-					if err := budget.run("account_health", finalizationHealthBudget, func(stageCtx context.Context) error {
-						return s.selector.MarkFailureAfterSuccess(stageCtx, credential, status, retryAfter)
-					}); err != nil {
-						s.logger.Warn("stream_failure_health_write_failed", "account_id", credential.ID, "provider", credential.Provider, "error", err)
+					if input.accountRevivalProbe {
+						s.logger.Info("stream_failure_revival_probe_skipped", "account_id", credential.ID, "error_code", errorCode)
+					} else if s.skipQualityPenalty(credential) {
+						s.logger.Info("stream_failure_new_account_skipped", "account_id", credential.ID, "error_code", errorCode, "grace", s.qualityRetryConfig().NewAccountGrace.String())
+					} else {
+						status, retryAfter := streamFailureHealthPenalty(errorCode, usage, s.qualityRetryConfig().IdleAccountCooldown)
+						if err := budget.run("account_health", finalizationHealthBudget, func(stageCtx context.Context) error {
+							return s.selector.MarkFailureAfterSuccess(stageCtx, credential, status, retryAfter)
+						}); err != nil {
+							s.logger.Warn("stream_failure_health_write_failed", "account_id", credential.ID, "provider", credential.Provider, "error", err)
+						}
 					}
 				}
 				lease.Release()
@@ -1215,7 +1227,9 @@ attemptLoop:
 		var lease *accountLease
 		var err error
 		selectionStarted := time.Now()
-		if input.ForcedAccountID != 0 {
+		if input.accountRevivalProbe && input.ForcedAccountID != 0 {
+			lease, err = s.selector.AcquirePinnedForDisabledRevival(ctx, route.Provider, input.ForcedAccountID)
+		} else if input.ForcedAccountID != 0 {
 			if input.ForcedEgressNodeID == 0 {
 				err = &SelectionUnavailableError{Reason: SelectionNoAccounts}
 			} else {
@@ -1319,15 +1333,21 @@ attemptLoop:
 			responseFailure := false
 			if status, retryAfter, classified := upstreamResponseErrorHealthPenalty(err, holdCfg.IdleAccountCooldown); classified {
 				responseFailure = true
-				writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
-				markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, status, retryAfter)
-				writeCancel()
-				if markErr != nil {
-					s.logger.Warn("upstream_response_health_write_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
+				if input.accountRevivalProbe {
+					s.logger.Info("upstream_response_revival_probe_skipped", "request_id", input.RequestID, "account_id", credential.ID, "status", status)
+				} else if s.skipQualityPenalty(credential) {
+					s.logger.Info("upstream_response_new_account_skipped", "request_id", input.RequestID, "account_id", credential.ID, "status", status, "grace", holdCfg.NewAccountGrace.String())
 				} else {
-					s.logger.Warn("upstream_response_health_retry", "request_id", input.RequestID, "account_id", credential.ID, "status", status, "minimum_cooldown", retryAfter)
+					writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+					markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, status, retryAfter)
+					writeCancel()
+					if markErr != nil {
+						s.logger.Warn("upstream_response_health_write_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
+					} else {
+						s.logger.Warn("upstream_response_health_retry", "request_id", input.RequestID, "account_id", credential.ID, "status", status, "minimum_cooldown", retryAfter)
+					}
 				}
-			} else {
+			} else if !input.accountRevivalProbe {
 				s.selector.MarkFailure(ctx, credential, 0, 0)
 			}
 			// The failed response is safe to retry on another account only when
@@ -1574,7 +1594,9 @@ attemptLoop:
 			continue
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			s.selector.markSuccess(ctx, credential, lease.QuotaProbe)
+			if !input.accountRevivalProbe {
+				s.selector.markSuccess(ctx, credential, lease.QuotaProbe)
+			}
 			if qualityHoldEnabled {
 				replay, verdict, peekUsage, _, peekErr := peekQualityStream(ctx, response.Body, qualityProtocolForOperation(operation), holdCfg)
 				if peekErr != nil {
@@ -1595,13 +1617,17 @@ attemptLoop:
 						if errors.Is(peekErr, errQualityEmptyStream) {
 							logPrefix = "quality_peek_empty"
 						}
-						writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
-						if markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, http.StatusGatewayTimeout, holdCfg.IdleAccountCooldown); markErr != nil {
-							s.logger.Warn(logPrefix+"_cooldown_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
+						if s.skipQualityPenalty(credential) {
+							s.logger.Info(logPrefix+"_new_account_skipped", "request_id", input.RequestID, "account_id", credential.ID, "grace", holdCfg.NewAccountGrace.String())
 						} else {
-							s.logger.Warn(logPrefix+"_retry", "request_id", input.RequestID, "account_id", credential.ID, "cooldown", holdCfg.IdleAccountCooldown)
+							writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+							if markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, http.StatusGatewayTimeout, holdCfg.IdleAccountCooldown); markErr != nil {
+								s.logger.Warn(logPrefix+"_cooldown_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
+							} else {
+								s.logger.Warn(logPrefix+"_retry", "request_id", input.RequestID, "account_id", credential.ID, "cooldown", holdCfg.IdleAccountCooldown)
+							}
+							writeCancel()
 						}
-						writeCancel()
 					}
 					if !qualityCrossAccountReplay || shouldStopForNonAccountFingerprint(failureFingerprints, lastFailure) {
 						break

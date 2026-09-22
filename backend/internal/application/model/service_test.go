@@ -335,6 +335,71 @@ func TestSyncAccountNormalizesBuildVideo15ByBillingSuper(t *testing.T) {
 	}
 }
 
+func TestSyncAccountKeepsPreviousModelsWhenCatalogShrinks(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "model-keep-known.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	kept, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, AuthType: account.AuthTypeOAuth, Name: "kept", SourceKey: "kept",
+		EncryptedAccessToken: encrypted, ExpiresAt: time.Now().Add(time.Hour), AuthStatus: account.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := accountRepo.SaveBilling(ctx, account.Billing{AccountID: kept.ID, Used: 1, PlanName: "free", SyncedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	const video15 = "grok-imagine-video-1.5"
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, kept.ID, []string{"grok-4.6", "grok-4.5", video15}, now); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &buildCapabilityNormalizerAdapter{modelCapabilityAdapter: &modelCapabilityAdapter{models: map[uint64][]string{
+		kept.ID: {"grok-4.7"},
+	}}}
+	registry := provider.NewRegistry(adapter)
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+	service := NewService(modelRepo, accountRepo, accountService, registry)
+	if _, err := service.SyncAccount(ctx, kept.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertSupports := func(upstream string, want bool) {
+		t.Helper()
+		candidates, listErr := accountRepo.ListRoutingCandidates(ctx, account.ProviderBuild, 0, upstream, "")
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		if len(candidates) != 1 || candidates[0].Credential.ID != kept.ID {
+			t.Fatalf("candidates for %s = %#v", upstream, candidates)
+		}
+		if !candidates[0].ModelCapabilityKnown || candidates[0].SupportsModel != want {
+			t.Fatalf("supports %s = %v, want %v", upstream, candidates[0].SupportsModel, want)
+		}
+	}
+	assertSupports("grok-4.6", true)
+	assertSupports("grok-4.5", true)
+	assertSupports("grok-4.7", true)
+	assertSupports(modeldomain.GrokComposer25Fast, true)
+	assertSupports(video15, false)
+}
+
 func TestSyncAccountRunsUpstreamDiscoveryConcurrently(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "model-account-sync.db"))

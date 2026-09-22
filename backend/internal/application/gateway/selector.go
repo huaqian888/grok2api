@@ -850,6 +850,56 @@ func (s *Selector) AcquirePinnedForQualityProbe(ctx context.Context, provider ac
 	return s.acquirePinned(ctx, provider, accountID, modelRouteID, upstreamModel, quotaMode, true, true, scope)
 }
 
+// AcquirePinnedForDisabledRevival loads a disabled account by ID and claims a
+// concurrency slot without inserting it into the live candidate pool.
+func (s *Selector) AcquirePinnedForDisabledRevival(ctx context.Context, provider account.Provider, accountID uint64) (*accountLease, error) {
+	if accountID == 0 || s.accounts == nil {
+		return nil, pinnedUnavailableError(accountID, "")
+	}
+	value, err := s.accounts.Get(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if value.Provider != provider || value.AuthStatus != account.AuthStatusActive {
+		return nil, pinnedUnavailableError(accountID, value.Name)
+	}
+	loader, ok := s.accounts.(interface {
+		GetCredentialMaterialIncludingDisabled(context.Context, uint64, account.Provider) (account.CredentialMaterial, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("账号仓库不支持停用号探测")
+	}
+	material, err := loader.GetCredentialMaterialIncludingDisabled(ctx, value.ID, value.Provider)
+	if err != nil {
+		return nil, err
+	}
+	hydrated, matched := material.ApplyTo(value)
+	if !matched {
+		return nil, pinnedUnavailableError(accountID, value.Name)
+	}
+	limit := hydrated.MaxConcurrent
+	if limit <= 0 {
+		limit = account.DefaultMaxConcurrent
+	}
+	release, acquired, err := s.concurrency.Acquire(ctx, accountConcurrencyKey(hydrated.ID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("获取账号并发租约: %w", err)
+	}
+	if !acquired {
+		return nil, &SelectionUnavailableError{Reason: SelectionSaturated, RetryAfter: time.Second}
+	}
+	releaseSlot := func() {
+		release()
+		s.announceLeaseReturn()
+	}
+	s.selectionMu.Lock()
+	s.lastSelectedAt[hydrated.ID] = time.Now().UTC()
+	s.selectionMu.Unlock()
+	return &accountLease{Credential: hydrated, release: func() {
+		releaseSlot()
+	}}, nil
+}
+
 func (s *Selector) acquirePinned(ctx context.Context, provider account.Provider, accountID, modelRouteID uint64, upstreamModel, quotaMode string, inference, ignoreEgressLeaseBlock bool, requestedScope clientkeydomain.AccountScope) (lease *accountLease, err error) {
 	accountScope, scopeValid := clientkeydomain.NormalizeAccountScope(requestedScope)
 	defer annotateSelectionAccountScope(&err, accountScope)
@@ -1038,6 +1088,19 @@ const (
 	missingThinkingPenaltyCooled    missingThinkingPenaltyResult = "cooled"
 	missingThinkingPenaltyDisabled  missingThinkingPenaltyResult = "disabled"
 )
+
+// MarkRevivedForLiveProbation pushes a just-enabled account to the back of
+// the live scheduler so idle revived accounts are not preferred over busy
+// healthy ones (inFlight=0 would otherwise win).
+func (s *Selector) MarkRevivedForLiveProbation(accountID uint64) {
+	if s == nil || accountID == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	s.selectionMu.Lock()
+	s.lastSelectedAt[accountID] = now
+	s.selectionMu.Unlock()
+}
 
 func (s *Selector) markSuccess(ctx context.Context, credential account.Credential, quotaProbe bool) {
 	now := time.Now().UTC()
@@ -1240,7 +1303,8 @@ func (s *Selector) markMissingThinking(ctx context.Context, credential account.C
 	}
 	now := time.Now().UTC()
 	inCooldown := credential.CooldownUntil != nil && now.Before(*credential.CooldownUntil)
-	if isMissingThinkingStrike(credential.LastError) && !inCooldown {
+	immediateDisable := !inCooldown && (isMissingThinkingStrike(credential.LastError) || credential.LastError == lastErrorThinkingProbation)
+	if immediateDisable {
 		disabled := false
 		if _, err := s.accounts.UpdateMany(ctx, credential.Provider, []uint64{credential.ID}, repository.AccountUpdates{Enabled: &disabled}); err != nil {
 			return missingThinkingPenaltyUnchanged, err

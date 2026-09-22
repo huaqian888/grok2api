@@ -721,3 +721,52 @@ func TestListCursorKeepsStableOrderAcrossEqualSortValues(t *testing.T) {
 		t.Fatalf("mismatched cursor error = %v", err)
 	}
 }
+
+func TestSummaryCustomRangeUsesStartAndEnd(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "audit-custom-range.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repository := relational.NewAuditRepository(database)
+	now := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	if err := repository.CreateBatch(ctx, []auditdomain.Record{
+		{RequestID: "inside", ClientKeyID: 1, ModelRouteID: 1, StatusCode: 200, TotalTokens: 10, CreatedAt: now.Add(-2 * time.Hour)},
+		{RequestID: "before", ClientKeyID: 1, ModelRouteID: 1, StatusCode: 200, TotalTokens: 99, CreatedAt: now.Add(-5 * time.Hour)},
+		{RequestID: "after", ClientKeyID: 1, ModelRouteID: 1, StatusCode: 200, TotalTokens: 99, CreatedAt: now.Add(-30 * time.Minute)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(repository, slog.Default(), 16, 8, time.Hour)
+	service.now = func() time.Time { return now }
+	result, err := service.Summary(ctx, "", "24h", ListFilter{
+		Start: now.Add(-3 * time.Hour).Format(time.RFC3339),
+		End:   now.Add(-time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Period != PeriodCustom || result.Usage.Requests != 1 || result.Usage.TotalTokens != 10 {
+		t.Fatalf("custom summary = %#v", result)
+	}
+	if _, err := service.Summary(ctx, "", "24h", ListFilter{Start: now.Format(time.RFC3339)}); !errors.Is(err, ErrInvalidPeriod) {
+		t.Fatalf("missing end error = %v", err)
+	}
+	if _, err := service.Summary(ctx, "", "24h", ListFilter{
+		Start: now.Add(-time.Hour).Format(time.RFC3339),
+		End:   now.Add(-2 * time.Hour).Format(time.RFC3339),
+	}); !errors.Is(err, ErrInvalidPeriod) {
+		t.Fatalf("inverted range error = %v", err)
+	}
+	page, err := service.ListCursor(ctx, "", 10, "", "", ListFilter{
+		Start: now.Add(-3 * time.Hour).Format(time.RFC3339),
+		End:   now.Add(-time.Hour).Format(time.RFC3339),
+	})
+	if err != nil || len(page.Items) != 1 || page.Items[0].RequestID != "inside" {
+		t.Fatalf("custom list = %#v, err = %v", page, err)
+	}
+}

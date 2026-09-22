@@ -45,6 +45,7 @@ import {
   enableWebAccountNSFW,
   convertWebAccountsToBuild,
   detectBuildAccounts,
+  probeQualityDisabledAccounts,
   exportAccountBatch,
   exportSelectedAccounts,
   getAccountSummary,
@@ -81,6 +82,7 @@ import {
   type BuildConversionInput,
   type BuildConversionStrategy,
   type BuildDetectItemDTO,
+  type QualityProbeItemDTO,
   type WebConsoleSyncInput,
   type WebAccountScriptActions,
   type WebAccountScriptsInput,
@@ -119,6 +121,7 @@ export function AccountsPage() {
   const quickImportFileInputRef = useRef<HTMLInputElement>(null);
   const quotaSyncAbortRef = useRef<AbortController | null>(null);
   const detectAbortRef = useRef<AbortController | null>(null);
+  const probeAbortRef = useRef<AbortController | null>(null);
   const detectOutcomeByIDRef = useRef(new Map<string, BuildDetectItemDTO["outcome"]>());
   const renewalAbortRef = useRef<AbortController | null>(null);
   const conversionAbortRef = useRef<AbortController | null>(null);
@@ -166,6 +169,9 @@ export function AccountsPage() {
   const [exportCompletedCount, setExportCompletedCount] = useState(0);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [detectDialogOpen, setDetectDialogOpen] = useState(false);
+  const [probeDialogOpen, setProbeDialogOpen] = useState(false);
+  const [probeProgress, setProbeProgress] = useState<AccountTaskProgressDTO | null>(null);
+  const [probeItems, setProbeItems] = useState<QualityProbeItemDTO[]>([]);
   const [detectMode, setDetectMode] = useState<"selected" | "all">("all");
   const [allQuotaTask, setAllQuotaTask] = useState<BuildQuotaTask>("sync");
   const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
@@ -199,6 +205,7 @@ export function AccountsPage() {
   useEffect(() => () => {
     quotaSyncAbortRef.current?.abort();
     detectAbortRef.current?.abort();
+    probeAbortRef.current?.abort();
     renewalAbortRef.current?.abort();
     conversionAbortRef.current?.abort();
     webConsoleSyncAbortRef.current?.abort();
@@ -823,6 +830,49 @@ export function AccountsPage() {
     setDetectDialogOpen(true);
   };
 
+  const probeMutation = useMutation({
+    mutationFn: () => {
+      const ids = [...selected];
+      if (ids.length > 10000) {
+        throw new ApiError(400, "invalidRequest", t("accounts.probeDisabledTooMany"));
+      }
+      const controller = new AbortController();
+      probeAbortRef.current = controller;
+      setProbeProgress(null);
+      setProbeItems([]);
+      return probeQualityDisabledAccounts(ids, {
+        onProgress: setProbeProgress,
+        onItem: (item) => {
+          if (!item.id) return;
+          setProbeItems((current) => {
+            const next = current.filter((entry) => entry.id !== item.id);
+            next.unshift(item);
+            return next.slice(0, 10000);
+          });
+        },
+      }, controller.signal);
+    },
+    onSuccess: (result) => {
+      clearSelection();
+      toast.success(t("accounts.probeDisabledCompleted", result));
+    },
+    onError: (error) => { if (!isAbortError(error)) showError(error); },
+    onSettled: () => {
+      probeAbortRef.current = null;
+      invalidateAccountData();
+    },
+  });
+
+  const closeProbeDialog = (open: boolean) => {
+    if (!open) {
+      if (probeMutation.isPending) probeAbortRef.current?.abort();
+      setProbeDialogOpen(false);
+      if (!probeMutation.isPending) setProbeItems([]);
+      return;
+    }
+    setProbeDialogOpen(true);
+  };
+
   const batchQuotaResetMutation = useMutation({
     mutationFn: () => resetAccountsQuota([...selected], provider),
     onSuccess: (result) => {
@@ -1265,6 +1315,7 @@ export function AccountsPage() {
     || batchConcurrencyMutation.isPending
     || batchBillingMutation.isPending
     || detectMutation.isPending
+    || probeMutation.isPending
     || batchQuotaResetMutation.isPending
     || batchTokenMutation.isPending
     || batchDeleteMutation.isPending
@@ -1434,6 +1485,7 @@ export function AccountsPage() {
                 }}>{t("accounts.egressConfiguration")}</Button>
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConversion([...selected])}>{t("accountConversion.action")}</Button> : null}
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets([...selected])}>{t("webAccountScripts.action")}</Button> : null}
+                {provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => { setProbeProgress(null); setProbeItems([]); setProbeDialogOpen(true); }}>{t("accounts.probeDisabled")}</Button> : null}
                 {provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("selected")}>{t("accountCredential.detectAction")}</Button> : null}
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => {
                   if (provider === "grok_build") {
@@ -1672,6 +1724,69 @@ export function AccountsPage() {
                   {detectProgress ? <span className="tabular-nums">{detectProgress.completed} / {detectProgress.total}</span> : t("common.loading")}
                 </>
               ) : t("accounts.detectAll")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={probeDialogOpen} onOpenChange={closeProbeDialog}>
+        <DialogContent className="max-w-xl gap-4 sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{t("accounts.probeDisabledTitle", { count: selected.size || probeItems.length })}</DialogTitle>
+            <DialogDescription>{t("accounts.probeDisabledDescription")}</DialogDescription>
+          </DialogHeader>
+          {(probeMutation.isPending || probeProgress || probeItems.length > 0) ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                <span className="text-muted-foreground">{t("accounts.probeDisabledProgress")}</span>
+                <span className="tabular-nums font-medium">
+                  {probeProgress ? `${probeProgress.completed} / ${probeProgress.total}` : probeMutation.isPending ? t("common.loading") : "—"}
+                </span>
+              </div>
+              <div className="max-h-64 overflow-y-auto rounded-md border">
+                {probeItems.length === 0 ? (
+                  <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+                    {probeMutation.isPending ? t("accounts.probeDisabledWaiting") : t("accounts.probeDisabledNoResults")}
+                  </div>
+                ) : (
+                  <ul className="divide-y">
+                    {probeItems.map((item) => (
+                      <li key={`${item.id}-${item.outcome}`} className="flex items-start gap-3 px-3 py-2 text-sm">
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            "mt-0.5 shrink-0",
+                            item.outcome === "revived" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300",
+                            item.outcome === "failed" && "border-destructive/40 text-destructive",
+                            item.outcome === "skipped" && "border-amber-500/40 text-amber-700 dark:text-amber-300",
+                            item.outcome === "timeout" && "border-sky-500/40 text-sky-700 dark:text-sky-300",
+                          )}
+                        >
+                          {t(`accounts.probeOutcome.${item.outcome}`)}
+                        </Badge>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-medium">{item.name || item.id}</div>
+                          {item.reason ? <div className="mt-0.5 break-all text-xs text-muted-foreground">{item.reason}</div> : null}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => closeProbeDialog(false)}>{probeMutation.isPending ? t("common.cancel") : t("common.close")}</Button>
+            <Button
+              disabled={probeMutation.isPending || selected.size === 0}
+              onClick={() => probeMutation.mutate()}
+            >
+              {probeMutation.isPending ? (
+                <>
+                  <Spinner />
+                  {probeProgress ? <span className="tabular-nums">{probeProgress.completed} / {probeProgress.total}</span> : t("common.loading")}
+                </>
+              ) : t("accounts.probeDisabled")}
             </Button>
           </DialogFooter>
         </DialogContent>
